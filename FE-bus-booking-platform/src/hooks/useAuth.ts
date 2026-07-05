@@ -1,0 +1,14 @@
+import { useSelector } from "react-redux"
+import type { RootState } from "../store"
+
+export function useAuth() {
+  const { user, isAuthenticated, isLoading } = useSelector((state: RootState) => state.auth)
+
+  return {
+    user,
+    isAuthenticated,
+    isLoading,
+    isOwner: isAuthenticated && user?.role === "owner",
+    isPassenger: isAuthenticated && user?.role === "passenger",
+  }
+}

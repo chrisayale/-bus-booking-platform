@@ -1,0 +1,120 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  html {
+    scroll-behavior: smooth;
+  }
+
+  body {
+    font-family: 'Inter', system-ui, sans-serif;
+  }
+
+  ::selection {
+    background-color: #f97316;
+    color: white;
+  }
+}
+
+@layer components {
+  .card-travel {
+    @apply bg-white rounded-xl border border-gray-100 shadow-sm hover:shadow-lg hover:border-travel-200 transition-all duration-300;
+  }
+
+  .card-travel-floating {
+    @apply bg-white/90 backdrop-blur-sm rounded-xl border border-white/20 shadow-lg;
+  }
+
+  .btn-primary {
+    @apply inline-flex items-center gap-2 bg-gradient-to-r from-ocean-500 to-ocean-600 text-white px-5 py-2.5 rounded-xl font-medium 
+           hover:from-ocean-600 hover:to-ocean-700 transition-all duration-200 shadow-md shadow-ocean-200/50;
+  }
+
+  .btn-secondary {
+    @apply inline-flex items-center gap-2 bg-white text-gray-700 px-5 py-2.5 rounded-xl font-medium 
+           border border-gray-200 hover:border-travel-300 hover:text-travel-600 hover:shadow-md transition-all duration-200;
+  }
+
+  .btn-ghost {
+    @apply inline-flex items-center gap-2 text-gray-500 hover:text-travel-600 hover:bg-travel-50 
+           px-3 py-2 rounded-lg transition-all duration-200 text-sm font-medium;
+  }
+
+  .gradient-warm {
+    @apply bg-gradient-to-br from-amber-50 via-orange-50 to-rose-50;
+  }
+
+  .gradient-sunset {
+    @apply bg-gradient-to-br from-orange-400 via-rose-500 to-purple-600;
+  }
+
+  .gradient-road {
+    @apply bg-gradient-to-br from-ocean-600 via-travel-500 to-amber-500;
+  }
+
+  .text-gradient {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-travel-500 to-rose-500;
+  }
+
+  .text-gradient-ocean {
+    @apply bg-clip-text text-transparent bg-gradient-to-r from-ocean-600 to-travel-500;
+  }
+
+  /* Scan-line animation for QR scanner */
+  @keyframes scan-line {
+    0%, 100% { top: 0%; }
+    50% { top: 95%; }
+  }
+
+  .animate-scan-line {
+    animation: scan-line 2.5s ease-in-out infinite;
+  }
+
+  .animate-delay-100 {
+    animation-delay: 100ms;
+  }
+
+  .animate-delay-200 {
+    animation-delay: 200ms;
+  }
+
+  .animate-delay-300 {
+    animation-delay: 300ms;
+  }
+
+  .animate-delay-500 {
+    animation-delay: 500ms;
+  }
+
+  .animate-delay-700 {
+    animation-delay: 700ms;
+  }
+}
+
+/* Custom scrollbar */
+::-webkit-scrollbar {
+  width: 8px;
+}
+
+::-webkit-scrollbar-track {
+  background: #f1f5f9;
+}
+
+::-webkit-scrollbar-thumb {
+  background: #cbd5e1;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar-thumb:hover {
+  background: #94a3b8;
+}
+
+/* Smooth backdrop blur support */
+@supports (backdrop-filter: blur(8px)) {
+  .glass {
+    background: rgba(255, 255, 255, 0.7);
+    backdrop-filter: blur(12px);
+    -webkit-backdrop-filter: blur(12px);
+  }
+}
