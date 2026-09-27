@@ -168,3 +168,58 @@ func (h *AnalyticsHandler) GetDashboardStats(c *gin.Context) {
 
 	c.JSON(http.StatusOK, stats)
 }
+
+type BusRevenue struct {
+	BusID              string  `db:"bus_id" json:"bus_id"`
+	RegistrationNumber string  `db:"registration_number" json:"registration_number"`
+	TicketCount        int     `db:"ticket_count" json:"ticket_count"`
+	Revenue            float64 `db:"revenue" json:"revenue"`
+}
+
+type RevenueReport struct {
+	TotalRevenue float64      `json:"total_revenue"`
+	ByBus        []BusRevenue `json:"by_bus"`
+}
+
+func (h *AnalyticsHandler) GetRevenueReport(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	startDate := c.Query("start_date")
+	endDate := c.Query("end_date")
+
+	if startDate == "" {
+		startDate = "1900-01-01"
+	}
+	if endDate == "" {
+		endDate = "2999-12-31"
+	}
+
+	var report RevenueReport
+
+	err := h.DB.Get(&report.TotalRevenue, `
+		SELECT COALESCE(SUM(t.price), 0) FROM tickets t
+		JOIN journeys j ON t.journey_id = j.id
+		WHERE j.organization_id=$1 AND t.status IN ('active', 'checked_in')
+		AND j.departure_date BETWEEN $2 AND $3`,
+		orgID, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute total revenue"})
+		return
+	}
+
+	err = h.DB.Select(&report.ByBus, `
+		SELECT b.id AS bus_id, b.registration_number,
+			COUNT(t.id) AS ticket_count, COALESCE(SUM(t.price), 0) AS revenue
+		FROM buses b
+		LEFT JOIN journeys j ON j.bus_id = b.id AND j.departure_date BETWEEN $2 AND $3
+		LEFT JOIN tickets t ON t.journey_id = j.id AND t.status IN ('active', 'checked_in')
+		WHERE b.organization_id = $1
+		GROUP BY b.id, b.registration_number
+		ORDER BY revenue DESC`,
+		orgID, startDate, endDate)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to compute revenue by bus"})
+		return
+	}
+
+	c.JSON(http.StatusOK, report)
+}

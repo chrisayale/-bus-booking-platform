@@ -21,6 +21,8 @@ services:
       dockerfile: Dockerfile
     ports:
       - "8080:8080"
+    env_file:
+      - .env
     environment:
       PORT: "8080"
       DATABASE_URL: "postgres://postgres:postgres@db:5432/bus_booking?sslmode=disable"

@@ -116,7 +116,7 @@ func (h *GuestHandler) GuestCheckout(c *gin.Context) {
 		err = tx.QueryRowx(`
 			INSERT INTO tickets (booking_id, journey_id, seat_number, passenger_name, passenger_phone,
 				boarding_stop_id, dropoff_stop_id, price, qr_token, download_token, download_token_expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)            RETURNING id, booking_id, journey_id, seat_number, passenger_name,
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10, $11)            RETURNING id, booking_id, journey_id, seat_number, passenger_name,passenger_phone,
                 boarding_stop_id, dropoff_stop_id, price, qr_token, status, created_at, updated_at`,
 			booking.ID, req.JourneyID, seat.SeatNumber, seat.PassengerName,
 			models.NullString(seat.PassengerPhone),

@@ -1,0 +1,8 @@
+				realPhone := GetRealPhoneNumber(Client, sender)
+				if strings.HasPrefix(realPhone, "0") {
+					realPhone = "243" + realPhone[1:]
+				}
+				s.PaymentPhone = strings.TrimSpace(realPhone)
+				s.PreviousStep = s.Step
+				s.Step = StepPaymentProcessing
+				return getPromptForStep(s)

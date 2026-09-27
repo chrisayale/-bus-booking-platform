@@ -6,9 +6,11 @@ import (
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/config"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/database"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/handlers"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/middleware"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/services"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/payments"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/rs/cors"
@@ -28,6 +30,17 @@ func main() {
 	defer db.Close()
 
 	// Run migrations
+		// Connect to WhatsApp
+		whatsapp.DB = db
+	whatsapp.QRSecret = cfg.JWTSecret
+	whatsapp.AppURL = cfg.AppURL
+	whatsapp.FlexPay = payments.NewFlexPayProvider()
+	whatsapp.StartPaymentTimeoutWorker()
+	go func() {
+		if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
+			log.Printf("Warning: WhatsApp connection failed: %v", err)
+		}
+	}()
 	if err := database.RunMigrations(db); err != nil {
 		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
 	}
@@ -59,10 +72,12 @@ func main() {
 	}
 
 	// Initialize handlers
-	b2bHandler := handlers.NewB2BHandler(db, storageSvc)
+		b2bHandler := handlers.NewB2BHandler(db, storageSvc, cfg.JWTSecret, cfg.JWTExpiry, cfg.RefreshExpiry)
 	b2cHandler := handlers.NewB2CHandler(db, cfg.JWTSecret, cfg.JWTSecret, cfg.JWTExpiry, cfg.RefreshExpiry, emailSvc)
 	guestHandler := handlers.NewGuestHandler(db, cfg.JWTSecret, emailSvc, cfg.AppURL)
 	analyticsHandler := handlers.NewAnalyticsHandler(db)
+	paymentHandler := handlers.NewPaymentHandler(db)
+	adminHandler := handlers.NewAdminHandler(db)
 
 	// Rate limiter for auth endpoints (login, register, forgot-password, etc.)
 	authRateLimiter := middleware.NewRateLimiter(cfg.RateLimitRequests, cfg.RateLimitWindow)
@@ -108,6 +123,14 @@ func main() {
 		c.JSON(200, gin.H{"status": "ok"})
 	})
 
+	r.GET("/api/whatsapp/qr", func(c *gin.Context) {
+		png := whatsapp.GetCurrentQR()
+		if png == nil {
+			c.String(http.StatusNotFound, "Pas de QR code disponible pour le moment (déjà connecté ou pas encore généré)")
+			return
+		}
+		c.Data(http.StatusOK, "image/png", png)
+	})
 	// Public routes (no auth required)
 	api := r.Group("/api")
 	{
@@ -130,6 +153,7 @@ func main() {
 
 		// Guest booking & ticket download (no auth required)
 		api.POST("/guest/checkout", guestHandler.GuestCheckout)
+		api.POST("/payments/flexpay/callback", paymentHandler.FlexPayCallback)
 		api.GET("/tickets/download/:token", b2cHandler.DownloadTicket)
 	}
 
@@ -169,6 +193,7 @@ func main() {
 		b2b.PUT("/buses/:id", b2bHandler.UpdateBus)
 		b2b.DELETE("/buses/:id", b2bHandler.DeleteBus)
 		b2b.POST("/buses/:id/upload-image", b2bHandler.UploadBusImage)
+		b2b.GET("/tickets", b2bHandler.ListOrganizationTickets)
 
 		// Routes
 		b2b.POST("/routes", b2bHandler.CreateRoute)
@@ -184,13 +209,38 @@ func main() {
 		// QR Scan
 		b2b.POST("/scan", b2bHandler.ScanTicket)
 
-		// Admin management (owner-only)
+				// Admin management (owner-only)
 		b2b.POST("/admin/users", b2bHandler.CreateAdminUser)
 		b2b.GET("/admin/users", b2bHandler.ListAdminUsers)
 		b2b.DELETE("/admin/users/:id", b2bHandler.DeleteAdminUser)
-
 		// Analytics
 		b2b.GET("/analytics/dashboard", analyticsHandler.GetDashboardStats)
+		b2b.GET("/analytics/revenue", analyticsHandler.GetRevenueReport)
+	}
+
+	// Admin routes (super-admin only)
+	admin := r.Group("/api/admin")
+	admin.Use(middleware.AuthMiddleware(cfg.JWTSecret), middleware.RoleMiddleware("platform_admin"))
+	{
+		admin.GET("/pending-owners", b2bHandler.ListPendingOwners)
+		admin.POST("/owners/:id/approve", b2bHandler.ApproveOwner)
+		admin.POST("/owners/:id/reject", b2bHandler.RejectOwner)
+		admin.GET("/pending-agencies", b2bHandler.ListPendingAgencies)
+		admin.POST("/agencies/:id/approve", b2bHandler.ApproveAgency)
+		admin.POST("/agencies/:id/reject", b2bHandler.RejectAgency)
+		admin.GET("/agencies", b2bHandler.ListAgencies)
+		admin.PATCH("/agencies/:id/status", b2bHandler.SetAgencyActive)
+		admin.POST("/agencies/:id/impersonate", b2bHandler.ImpersonateOwner)
+		admin.GET("/exchange-rate", adminHandler.GetExchangeRate)
+		admin.PUT("/exchange-rate", adminHandler.UpdateExchangeRate)
+	}
+
+	// Platform routes (super-admin only)
+	platform := r.Group("/api/platform")
+	platform.Use(middleware.AuthMiddleware(cfg.JWTSecret), middleware.RoleMiddleware("platform_admin"))
+	{
+		platform.GET("/agencies", b2bHandler.ListAgencies)
+		platform.GET("/pending-agencies", b2bHandler.ListPendingAgencies)
 	}
 
 	log.Printf("Server starting on port %s", cfg.Port)

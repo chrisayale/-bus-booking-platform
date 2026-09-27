@@ -13,6 +13,7 @@ type Organization struct {
 	Email     string    `db:"email" json:"email"`
 	Phone     *string   `db:"phone" json:"phone,omitempty"`
 	LogoURL   *string   `db:"logo_url" json:"logo_url,omitempty"`
+	IsActive  bool      `db:"is_active" json:"is_active"`
 	CreatedAt time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
 }
@@ -27,6 +28,7 @@ type User struct {
 	Role                      string     `db:"role" json:"role"`
 	OrganizationID            *string    `db:"organization_id" json:"organization_id,omitempty"`
 	IsVerified                bool       `db:"is_verified" json:"is_verified"`
+	ApprovalStatus             string     `db:"approval_status" json:"approval_status"`
 	VerificationToken         *string    `db:"verification_token" json:"-"`
 	VerificationTokenExpiresAt *time.Time `db:"verification_token_expires_at" json:"-"`
 	ResetToken                *string    `db:"reset_token" json:"-"`
@@ -96,8 +98,9 @@ type Journey struct {
 	Status         string    `db:"status" json:"status"`
 	CreatedAt      time.Time `db:"created_at" json:"created_at"`
 	UpdatedAt      time.Time `db:"updated_at" json:"updated_at"`
-	Route          *Route    `db:"-" json:"route,omitempty"`
-	Bus            *Bus      `db:"-" json:"bus,omitempty"`
+	Route          *Route        `db:"-" json:"route,omitempty"`
+	Bus            *Bus          `db:"-" json:"bus,omitempty"`
+	Organization   *Organization `db:"-" json:"organization,omitempty"`
 }
 
 // Booking represents a ticket purchase
@@ -144,10 +147,12 @@ type LoginRequest struct {
 }
 
 type RegisterRequest struct {
-	Email    string `json:"email" binding:"required"`
-	Password string `json:"password" binding:"required,min=6"`
-	FullName string `json:"full_name" binding:"required"`
-	Phone    string `json:"phone"`
+	Email       string `json:"email" binding:"required"`
+	Password    string `json:"password" binding:"required,min=6"`
+	FullName    string `json:"full_name" binding:"required"`
+	Phone       string `json:"phone"`
+	Role        string `json:"role"`
+	AgencyName  string `json:"agency_name"`
 }
 
 type TokenResponse struct {

@@ -53,7 +53,7 @@ func RunMigrations(db *sqlx.DB) error {
 		log.Printf("Running migration: %s", file)
 		if _, err := db.Exec(string(content)); err != nil {
 			// Only skip "already exists" errors — fail on everything else
-			if pgErr, ok := err.(*pq.Error); ok && (pgErr.Code == "42P07" || pgErr.Code == "42710") {
+			if pgErr, ok := err.(*pq.Error); ok && (pgErr.Code == "42P07" || pgErr.Code == "42710" || pgErr.Code == "42701") {
 				log.Printf("Skipping migration %s (already applied): %v", file, err)
 				continue
 			}

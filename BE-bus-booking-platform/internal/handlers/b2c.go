@@ -48,28 +48,55 @@ func (h *B2CHandler) Register(c *gin.Context) {
 		return
 	}
 
-	hash, err := utils.HashPassword(req.Password)
+		hash, err := utils.HashPassword(req.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 		return
 	}
 
-	// Public registration always creates a passenger account for security
 	role := "passenger"
+	approvalStatus := "approved"
+	var orgID *string
+
+	if req.Role == "owner" {
+		if req.AgencyName == "" {
+			c.JSON(http.StatusBadRequest, gin.H{"error": "agency_name is required for owner registration"})
+			return
+		}
+		role = "owner"
+		approvalStatus = "pending"
+
+		var newOrgID string
+		err = h.DB.QueryRowx(`
+			INSERT INTO organizations (name, email, phone)
+			VALUES ($1, $2, $3)
+			RETURNING id`,
+			req.AgencyName, req.Email, models.NullString(req.Phone),
+		).Scan(&newOrgID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+			return
+		}
+		orgID = &newOrgID
+	}
 
 	var user models.User
 	err = h.DB.QueryRowx(`
-		INSERT INTO users (email, password_hash, full_name, phone, role)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, email, full_name, phone, role, organization_id, is_verified, created_at, updated_at`,
-		req.Email, hash, req.FullName, models.NullString(req.Phone), role,
+		INSERT INTO users (email, password_hash, full_name, phone, role, organization_id, approval_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7)
+		RETURNING id, email, full_name, phone, role, organization_id, is_verified, approval_status, created_at, updated_at`,
+		req.Email, hash, req.FullName, models.NullString(req.Phone), role, orgID, approvalStatus,
 	).StructScan(&user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
 		return
 	}
 
-	c.JSON(http.StatusCreated, gin.H{"message": "user created", "user": user})
+	msg := "user created"
+	if approvalStatus == "pending" {
+		msg = "account created, pending approval"
+	}
+	c.JSON(http.StatusCreated, gin.H{"message": msg, "user": user})
 }
 
 func (h *B2CHandler) Login(c *gin.Context) {
@@ -90,11 +117,25 @@ func (h *B2CHandler) Login(c *gin.Context) {
 		return
 	}
 
-	if !utils.CheckPassword(req.Password, user.PasswordHash) {
+		if !utils.CheckPassword(req.Password, user.PasswordHash) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-
+		if user.Role == "owner" && user.ApprovalStatus == "pending" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending approval"})
+		return
+	}
+	if user.Role == "owner" && user.ApprovalStatus == "rejected" {
+		c.JSON(http.StatusForbidden, gin.H{"error": "your agency account was rejected"})
+		return
+	}
+	if user.Role == "owner" && user.OrganizationID != nil {
+		var orgActive bool
+		if err := h.DB.Get(&orgActive, `SELECT is_active FROM organizations WHERE id = $1`, *user.OrganizationID); err == nil && !orgActive {
+			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account has been deactivated"})
+			return
+		}
+	}
 	orgID := ""
 	if user.OrganizationID != nil {
 		orgID = *user.OrganizationID
@@ -152,9 +193,13 @@ func (h *B2CHandler) SearchTrips(c *gin.Context) {
 		return
 	}
 
-	var journeys []models.Journey
+		var journeys []models.Journey
 	err := h.DB.Select(&journeys, `
-		SELECT j.* FROM journeys j
+		SELECT j.id, j.organization_id, j.route_id, j.bus_id,
+			j.departure_date::text, j.departure_time::text,
+			j.arrival_date::text, j.arrival_time::text,
+			j.status, j.created_at, j.updated_at
+		FROM journeys j
 		JOIN routes r ON j.route_id = r.id
 		WHERE r.origin ILIKE $1
 		  AND r.destination ILIKE $2
@@ -177,9 +222,14 @@ func (h *B2CHandler) SearchTrips(c *gin.Context) {
 			journeys[i].Route = &route
 		}
 
-		var bus models.Bus
+				var bus models.Bus
 		if err := h.DB.Get(&bus, `SELECT * FROM buses WHERE id=$1`, journeys[i].BusID); err == nil {
 			journeys[i].Bus = &bus
+		}
+
+		var org models.Organization
+		if err := h.DB.Get(&org, `SELECT * FROM organizations WHERE id=$1`, journeys[i].OrganizationID); err == nil {
+			journeys[i].Organization = &org
 		}
 
 		// Count booked seats and store remaining as available_seats (don't mutate Capacity)
@@ -464,12 +514,25 @@ func (h *B2CHandler) GetUserBookings(c *gin.Context) {
 			WHERE t.booking_id=$1`, bookings[i].ID)
 
 		// Enrich tickets with journey & route data (1 query for the booking's journey)
-		if len(tickets) > 0 {
-			var journey models.Journey
-			if err := h.DB.Get(&journey, `SELECT * FROM journeys WHERE id=$1`, tickets[0].JourneyID); err == nil {
+				if len(tickets) > 0 {
+						var journey models.Journey
+			if err := h.DB.Get(&journey, `
+				SELECT id, organization_id, route_id, bus_id,
+					departure_date::text, departure_time::text,
+					arrival_date::text, arrival_time::text,
+					status, created_at, updated_at
+				FROM journeys WHERE id=$1`, tickets[0].JourneyID); err == nil {
 				var route models.Route
 				if err := h.DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, journey.RouteID); err == nil {
 					journey.Route = &route
+				}
+				var bus models.Bus
+				if err := h.DB.Get(&bus, `SELECT * FROM buses WHERE id=$1`, journey.BusID); err == nil {
+					journey.Bus = &bus
+				}
+				var org models.Organization
+				if err := h.DB.Get(&org, `SELECT * FROM organizations WHERE id=$1`, journey.OrganizationID); err == nil {
+					journey.Organization = &org
 				}
 				for j := range tickets {
 					tickets[j].Journey = &journey

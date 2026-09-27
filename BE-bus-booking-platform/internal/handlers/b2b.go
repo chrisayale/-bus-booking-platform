@@ -2,6 +2,8 @@ package handlers
 
 import (
 	"bytes"
+	"context"
+	"fmt"
 	"database/sql"
 	"encoding/json"
 	"io"
@@ -12,17 +14,25 @@ import (
 	"github.com/bus-booking/BE-bus-booking-platform/internal/models"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/services"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	waProto "go.mau.fi/whatsmeow/proto/waE2E"
+	waTypes "go.mau.fi/whatsmeow/types"
+	"google.golang.org/protobuf/proto"
 )
 
+
 type B2BHandler struct {
-	DB          *sqlx.DB
-	StorageSvc  services.StorageService
+	DB            *sqlx.DB
+	StorageSvc    services.StorageService
+	JWTSecret     string
+	JWTExpiry     time.Duration
+	RefreshExpiry time.Duration
 }
 
-func NewB2BHandler(db *sqlx.DB, storageSvc services.StorageService) *B2BHandler {
-	return &B2BHandler{DB: db, StorageSvc: storageSvc}
+func NewB2BHandler(db *sqlx.DB, storageSvc services.StorageService, jwtSecret string, jwtExpiry, refreshExpiry time.Duration) *B2BHandler {
+	return &B2BHandler{DB: db, StorageSvc: storageSvc, JWTSecret: jwtSecret, JWTExpiry: jwtExpiry, RefreshExpiry: refreshExpiry}
 }
 
 // ======================== BUSES ========================
@@ -227,7 +237,7 @@ func (h *B2BHandler) DeleteRoute(c *gin.Context) {
 	}
 	rows, _ := result.RowsAffected()
 	if rows == 0 {
-		c.JSON(http.StatusNotFound, gin.H{"error": "route not found"})
+		c.JSON(http.StatusNotFound, gin.H{"error": "route not found or already processed"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "route deleted"})
@@ -275,7 +285,12 @@ func (h *B2BHandler) CreateJourney(c *gin.Context) {
 func (h *B2BHandler) ListJourneys(c *gin.Context) {
 	orgID := c.GetString("org_id")
 	var journeys []models.Journey
-	err := h.DB.Select(&journeys, `SELECT * FROM journeys WHERE organization_id = $1 ORDER BY departure_date DESC, departure_time DESC`, orgID)
+	err := h.DB.Select(&journeys, `
+		SELECT id, organization_id, route_id, bus_id,
+			departure_date::text, departure_time::text,
+			arrival_date::text, arrival_time::text,
+			status, created_at, updated_at
+		FROM journeys WHERE organization_id = $1 ORDER BY departure_date DESC, departure_time DESC`, orgID)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list journeys"})
 		return
@@ -444,6 +459,319 @@ func (h *B2BHandler) ListAdminUsers(c *gin.Context) {
 
 	c.JSON(http.StatusOK, users)
 }
+
+// ======================== PLATFORM ADMIN ========================
+
+func (h *B2BHandler) ListPendingOwners(c *gin.Context) {
+	var users []models.User
+	err := h.DB.Select(&users, `
+		SELECT id, email, full_name, phone, role, organization_id, is_verified, approval_status, created_at, updated_at
+		FROM users WHERE role = 'owner' AND approval_status = 'pending'
+		ORDER BY created_at DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list pending owners"})
+		return
+	}
+	c.JSON(http.StatusOK, users)
+}
+
+func (h *B2BHandler) ApproveOwner(c *gin.Context) {
+	id := c.Param("id")
+	_, err := h.DB.Exec(`UPDATE users SET approval_status = 'approved', updated_at = NOW() WHERE id = $1 AND role = 'owner'`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to approve owner"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "owner approved"})
+}
+
+func (h *B2BHandler) RejectOwner(c *gin.Context) {
+	id := c.Param("id")
+	_, err := h.DB.Exec(`UPDATE users SET approval_status = 'rejected', updated_at = NOW() WHERE id = $1 AND role = 'owner'`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reject owner"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "owner rejected"})
+}
+
+func (h *B2BHandler) ListAgencies(c *gin.Context) {
+	var orgs []models.Organization
+	err := h.DB.Select(&orgs, `SELECT id, name, email, phone, logo_url, is_active, created_at, updated_at FROM organizations ORDER BY created_at DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list agencies"})
+		return
+	}
+	c.JSON(http.StatusOK, orgs)
+}
+
+// ListPendingAgencies returns all pending agency requests awaiting approval
+func (h *B2BHandler) ListPendingAgencies(c *gin.Context) {
+	var pendingAgencies []struct {
+		ID            string    `db:"id" json:"id"`
+		AgencyName    string    `db:"agency_name" json:"agency_name"`
+		ManagerName   string    `db:"manager_name" json:"manager_name"`
+		Address       string    `db:"address" json:"address"`
+		ContactPhone  string    `db:"contact_phone" json:"contact_phone"`
+		Email         string    `db:"email" json:"email"`
+		DefaultPassword string  `db:"default_password" json:"default_password"`
+		Status        string    `db:"status" json:"status"`
+		CreatedAt     time.Time `db:"created_at" json:"created_at"`
+		UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
+	}
+	err := h.DB.Select(&pendingAgencies, `SELECT id, agency_name, manager_name, address, contact_phone, email, default_password, status, created_at, updated_at FROM pending_agencies WHERE status = 'pending' ORDER BY created_at DESC`)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list pending agencies"})
+		return
+	}
+	c.JSON(http.StatusOK, pendingAgencies)
+}
+
+// ApproveAgency approves a pending agency request and creates the organization
+func (h *B2BHandler) ApproveAgency(c *gin.Context) {
+	id := c.Param("id")
+
+	// Start transaction
+	tx, err := h.DB.Beginx()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Get the pending agency
+	var pendingAgency struct {
+		ID            string    `db:"id"`
+		AgencyName    string    `db:"agency_name"`
+		ManagerName   string    `db:"manager_name"`
+		Address       string    `db:"address"`
+		ContactPhone  string    `db:"contact_phone"`
+		Email         string    `db:"email"`
+		DefaultPassword string  `db:"default_password"`
+		Status        string    `db:"status"`
+	}
+
+	err = tx.Get(&pendingAgency, `SELECT id, agency_name, manager_name, address, contact_phone, email, default_password, status FROM pending_agencies WHERE id = $1`, id)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "pending agency not found"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch pending agency"})
+		}
+		return
+	}
+
+	// Check if already processed
+	if pendingAgency.Status != "pending" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "agency request has already been processed"})
+		return
+	}
+
+	// Hash the default password
+	passwordHash, err := utils.HashPassword(pendingAgency.DefaultPassword)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	// Create organization record
+	var organization models.Organization
+	err = tx.QueryRowx(`
+		INSERT INTO organizations (name, email, phone, is_active)
+		VALUES ($1, $2, $3, $4)
+		RETURNING id, name, email, phone, logo_url, is_active, created_at, updated_at`,
+		pendingAgency.AgencyName,
+		pendingAgency.Email,
+		pendingAgency.ContactPhone,
+		true, // Set as active upon approval
+	).StructScan(&organization)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+		return
+	}
+
+	// Create owner user record for the agency manager
+	var user models.User
+	err = tx.QueryRowx(`
+		INSERT INTO users (email, password_hash, full_name, phone, role, organization_id, is_verified, approval_status)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, email, full_name, phone, role, organization_id, is_verified, approval_status, created_at, updated_at`,
+		pendingAgency.Email,
+		passwordHash,
+		pendingAgency.ManagerName,
+		pendingAgency.ContactPhone,
+		"owner",
+		organization.ID,
+		true, // is_verified
+		"approved", // approval_status
+	).StructScan(&user)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create owner user"})
+		return
+	}
+
+	// Update pending agency status to approved
+	_, err = tx.Exec(`UPDATE pending_agencies SET status = 'approved', updated_at = NOW() WHERE id = $1`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update pending agency status"})
+		return
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		return
+	}
+
+	// Send WhatsApp notification about successful approval
+	go func() {
+		// Format the WhatsApp message
+		message := fmt.Sprintf("Votre compte a été activé avec succès !\n\n📧 Email : %s\n🔑 Mot de passe par défaut : at1234\n\nVeuillez choisir une option :\n1. Changer le mot de passe\n2. Pas maintenant\n\nRépondez avec le numéro de votre choix.", pendingAgency.Email)
+
+		// Send the WhatsApp message using the client directly
+		jid := waTypes.NewJID(pendingAgency.ContactPhone, waTypes.DefaultUserServer)
+		msg := &waProto.Message{
+			Conversation: proto.String(message),
+		}
+		if _, err := whatsapp.Client.SendMessage(context.Background(), jid, msg); err != nil {
+			// Log error but don't fail the approval process
+			fmt.Printf("[ERROR] Failed to send WhatsApp message to %s: %v\n", pendingAgency.ContactPhone, err)
+		}
+
+		// Set up the FSM state for handling the response
+		whatsapp.SetSessionStep(pendingAgency.ContactPhone, whatsapp.StepPasswordChangeMenu)
+	}()
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": "agency approved successfully",
+		"organization": organization,
+		"user": user,
+	})
+}
+
+// RejectAgency rejects a pending agency request
+func (h *B2BHandler) RejectAgency(c *gin.Context) {
+	id := c.Param("id")
+
+	// Update the pending agency status to rejected
+	result, err := h.DB.Exec(`UPDATE pending_agencies SET status = 'rejected', updated_at = NOW() WHERE id = $1 AND status = 'pending'`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reject agency"})
+		return
+	}
+
+	rows, _ := result.RowsAffected()
+	if rows == 0 {
+		c.JSON(http.StatusNotFound, gin.H{"error": "pending agency not found or already processed"})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "agency rejected"})
+}
+
+func (h *B2BHandler) SetAgencyActive(c *gin.Context) {
+	id := c.Param("id")
+	var req struct {
+		IsActive bool `json:"is_active"`
+	}
+	if err := c.ShouldBindJSON(&req); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
+		return
+	}
+	_, err := h.DB.Exec(`UPDATE organizations SET is_active = $1, updated_at = NOW() WHERE id = $2`, req.IsActive, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update agency status"})
+		return
+	}
+	c.JSON(http.StatusOK, gin.H{"message": "agency status updated"})
+}
+
+type TicketWithDetails struct {
+	TicketID         string  `db:"ticket_id" json:"ticket_id"`
+	PassengerName    string  `db:"passenger_name" json:"passenger_name"`
+	PassengerPhone   *string `db:"passenger_phone" json:"passenger_phone,omitempty"`
+	SeatNumber       string  `db:"seat_number" json:"seat_number"`
+	Price            float64 `db:"price" json:"price"`
+	TicketStatus     string  `db:"ticket_status" json:"ticket_status"`
+	JourneyID        string  `db:"journey_id" json:"journey_id"`
+	DepartureDate    string  `db:"departure_date" json:"departure_date"`
+	DepartureTime    string  `db:"departure_time" json:"departure_time"`
+	BusID            string  `db:"bus_id" json:"bus_id"`
+	RegistrationNumber string `db:"registration_number" json:"registration_number"`
+	Origin           string  `db:"origin" json:"origin"`
+	Destination      string  `db:"destination" json:"destination"`
+	BookingReference string  `db:"booking_reference" json:"booking_reference"`
+	BookingStatus    string  `db:"booking_status" json:"booking_status"`
+	BookedAt         string  `db:"booked_at" json:"booked_at"`
+}
+
+func (h *B2BHandler) ListOrganizationTickets(c *gin.Context) {
+	orgID := c.GetString("org_id")
+	busID := c.Query("bus_id")
+	journeyID := c.Query("journey_id")
+
+	query := `
+		SELECT t.id AS ticket_id, t.passenger_name, t.passenger_phone, t.seat_number, t.price,
+			t.status AS ticket_status, j.id AS journey_id, j.departure_date::text, j.departure_time::text,
+			b.id AS bus_id, b.registration_number, r.origin, r.destination,
+			bk.booking_reference, bk.status AS booking_status, bk.created_at::text AS booked_at
+		FROM tickets t
+		JOIN journeys j ON t.journey_id = j.id
+		JOIN buses b ON j.bus_id = b.id
+		JOIN routes r ON j.route_id = r.id
+		JOIN bookings bk ON t.booking_id = bk.id
+		WHERE j.organization_id = $1`
+
+	args := []interface{}{orgID}
+	if busID != "" {
+		args = append(args, busID)
+		query += fmt.Sprintf(" AND b.id = $%d", len(args))
+	}
+	if journeyID != "" {
+		args = append(args, journeyID)
+		query += fmt.Sprintf(" AND j.id = $%d", len(args))
+	}
+	query += " ORDER BY bk.created_at DESC"
+
+	var tickets []TicketWithDetails
+	if err := h.DB.Select(&tickets, query, args...); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to list tickets"})
+		return
+	}
+	c.JSON(http.StatusOK, tickets)
+}
+
+func (h *B2BHandler) ImpersonateOwner(c *gin.Context) {
+	orgID := c.Param("id")
+
+	var user models.User
+	err := h.DB.Get(&user, `
+		SELECT * FROM users
+		WHERE organization_id = $1 AND role = 'owner' AND approval_status = 'approved'
+		ORDER BY created_at ASC LIMIT 1`, orgID)
+	if err != nil {
+		c.JSON(http.StatusNotFound, gin.H{"error": "no approved owner found for this agency"})
+		return
+	}
+
+	accessToken, err := utils.GenerateToken(h.JWTSecret, user.ID, user.Email, user.Role, orgID, h.JWTExpiry)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate token"})
+		return
+	}
+	refreshToken, err := utils.GenerateToken(h.JWTSecret, user.ID, user.Email, user.Role, orgID, h.RefreshExpiry)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate refresh token"})
+		return
+	}
+
+	c.JSON(http.StatusOK, models.TokenResponse{
+		AccessToken:  accessToken,
+		RefreshToken: refreshToken,
+		User:         user,
+	})
+}
+
 
 func (h *B2BHandler) DeleteAdminUser(c *gin.Context) {
 	userID := c.Param("id")

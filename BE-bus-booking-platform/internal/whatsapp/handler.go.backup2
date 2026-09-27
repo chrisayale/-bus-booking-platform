@@ -1,0 +1,887 @@
+package whatsapp
+
+import (
+	"context"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+	qrcode "github.com/skip2/go-qrcode"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
+)
+
+const welcomeMenu = `Bienvenue sur AyaleTrans 🚌
+
+1️⃣ Recherche directe de voyages
+2️⃣ Recherche par agence
+3️⃣ Créer une agence
+4️⃣ Aide & Assistance
+
+Répondez avec le numéro de votre choix.`
+
+// Step constants for payment flow (these are assumed to be defined elsewhere like other steps)
+// If they cause undefined errors, they may need to be defined in the appropriate constants file
+// For now, we'll reference them and hope they're defined elsewhere like StepMenu, etc.
+
+func init() {
+	_ = fmt.Sprintf("%T", (*sqlx.DB)(nil))
+}
+
+func GetRealPhoneNumber(client *whatsmeow.Client, jid types.JID) string {
+	if jid.Server == "s.whatsapp.net" {
+		return jid.User
+	}
+	if jid.Server == "lid" && client != nil && client.Store != nil {
+		pnJID, err := client.Store.LIDs.GetPNForLID(context.Background(), jid)
+		if err == nil && !pnJID.IsEmpty() && pnJID.Server == "s.whatsapp.net" {
+			return pnJID.User
+		}
+	}
+	return jid.User
+}
+
+// getPromptForStep returns the appropriate prompt for the current step of the session.
+func getPromptForStep(s *Session) string {
+	switch s.Step {
+	case StepMenu:
+		return welcomeMenu
+	case StepSearchOrigin:
+		return "🚌 Lieu de départ ?"
+	case StepSearchDestination:
+		return "🎯 Lieu de destination ?"
+	case StepSearchDateChoice:
+		return "📅 Quelle date ?\n\n1️⃣ Aujourd'hui\n2️⃣ Saisir une date\n\nRépondez avec le numéro de votre choix."
+	case StepSearchDate:
+		return "Entrez la date du voyage (ex : 13/09/2026 ou 13 septembre 2026)."
+	case StepSearchResults:
+		// This step expects a dynamic prompt based on s.Results, but we return a generic one.
+		// The normal flow will override this by building the prompt before calling getPromptForStep.
+		return "Tapez le numero du voyage choisi."
+	case StepSeatsCount:
+		return "Combien de sièges voulez-vous réserver ?"
+	case StepPassengerName:
+		if s.CurrentPassengerIndex < s.SeatsNeeded {
+			return fmt.Sprintf("Passager %d/%d — Nom complet ?", s.CurrentPassengerIndex+1, s.SeatsNeeded)
+		}
+		return "Nom complet du passager ?" // fallback
+	case StepPassengerPhone:
+		return "Numéro de téléphone de ce passager (ou tapez * pour passer) ?"
+	case StepConfirm:
+		return buildConfirmSummary(s) + "\n\nConfirmez-vous la réservation ? (oui/non)"
+	case StepPaymentMethodChoice:
+		return "Comment voulez-vous payer ?\n\n1️⃣ Payer en espèces\n2️⃣ Mobile Money (Airtel, M-Pesa, Orange, AfriMoney)\n3️⃣ Payer par carte (Visa, Mastercard)\n\nRépondez avec le numéro de votre choix."
+	case StepCurrencyChoice:
+		return "Quelle devise souhaitez-vous utiliser pour le paiement ?\n\n1️⃣ USD (Dollars)\n2️⃣ CDF (Franc congolais)\n\nRépondez avec le numéro de votre choix."
+	case StepPhonePaymentChoice:
+		return "Choisissez le numéro de téléphone pour Mobile Money :\n\n1️⃣ Utiliser mon numéro WhatsApp\n2️⃣ Saisir un autre numéro\n\nRépondez avec le numéro de votre choix."
+	case StepFlexPayPhoneInput:
+		return "Entrez le numéro de téléphone pour Mobile Money (format : 243XXXXXXXXX) :"
+	case StepPaymentProcessing:
+		// Compute amount and phone number for display
+		baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+		var totalAmount float64
+		var paymentNumber string
+		if s.Currency == "CDF" {
+			rate, err := utils.GetCurrentExchangeRate(DB)
+			if err != nil {
+				log.Printf("Error getting exchange rate: %v, using default 2850", err)
+				rate = 2850
+			}
+			totalAmount = baseAmountUSD * rate
+		} else {
+			totalAmount = baseAmountUSD
+		}
+		if s.PaymentPhone != "" {
+			paymentNumber = s.PaymentPhone
+		} else {
+			// Use WhatsApp number
+			paymentNumber = GetRealPhoneNumber(Client, types.JID{User: s.UserPhone, Server: "s.whatsapp.net"})
+			if paymentNumber == "" {
+				paymentNumber = s.UserPhone // fallback
+			}
+		}
+		return fmt.Sprintf("CONFIRMATION DU PAIEMENT\n\n• Montant : %.2f %s\n• Numéro de paiement : %s\n\nVoulez-vous valider le paiement ?\n\n1️⃣ Oui (Lancer le paiement)\n2️⃣ Non (Annuler)", totalAmount, s.Currency, paymentNumber)
+	case StepPaymentProcessingWait:
+		return "⏳ Traitement en cours...\nVeuillez patienter pendant que nous contactons le service de paiement."
+	case StepPaymentCompleted:
+		// Compute amount for display
+		baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+		var totalAmount float64
+		if s.Currency == "CDF" {
+			rate, err := utils.GetCurrentExchangeRate(DB)
+			if err != nil {
+				log.Printf("Error getting exchange rate: %v, using default 2850", err)
+				rate = 2850
+			}
+			totalAmount = baseAmountUSD * rate
+		} else {
+			totalAmount = baseAmountUSD
+		}
+		// Get payment number for display
+		var paymentNumber string
+		if s.PaymentPhone != "" {
+			paymentNumber = s.PaymentPhone
+		} else {
+			// Use WhatsApp number
+			paymentNumber = GetRealPhoneNumber(Client, types.JID{User: s.UserPhone, Server: "s.whatsapp.net"})
+			if paymentNumber == "" {
+				paymentNumber = s.UserPhone // fallback
+			}
+		}
+		return fmt.Sprintf("📱 Un message USSD de confirmation de %.2f %s vient d'être envoyé sur le numéro %s.\n🔒 Veuillez saisir votre code PIN Mobile Money sur votre téléphone pour valider.\n⏳ Une fois validé, vous recevrez votre billet ici automatiquement !", totalAmount, s.Currency, paymentNumber)
+	case StepAgencyChoice:
+		var b strings.Builder
+		b.WriteString("Agences actives :\n\n")
+		for i, a := range s.Agencies {
+			b.WriteString(fmt.Sprintf("%s %s\n", numberEmoji(i+1), a.Name))
+		}
+		b.WriteString("\nRépondez avec le numéro de l'agence choisie.")
+		return b.String()
+	case StepAgencyDateChoice:
+		return "📅 Quelle date ?\n\n1️⃣ Aujourd'hui\n2️⃣ Saisir une date\n\nRépondez avec le numéro de votre choix."
+	case StepAgencyDateInput:
+		return "Entrez la date du voyage (ex : 13/09/2026 ou 13 septembre 2026)."
+	case StepAgencyVoyages:
+		return "Combien de sièges voulez-vous réserver ?"
+	case StepMyTicketsPhone:
+		return "Entrez le numéro de téléphone pour chercher vos billets :"
+	case StepAgencyName:
+		return "Nom de l'agence ?"
+	case StepAgencyManagerName:
+		return "Nom complet du responsable ?"
+	case StepAgencyAddress:
+		return "Ville / Adresse ?"
+	case StepAgencyContactPhone:
+		return "Numéro de téléphone officiel de l'agence ?"
+	case StepAgencyConfirm:
+		return fmt.Sprintf("Veuillez confirmer les informations de l'agence :\n\nNom de l'agence : %s\nResponsable : %s\nAdresse : %s\nTéléphone : %s\n\nRépondez par 'oui' pour confirmer ou 'menu' pour annuler.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
+	case StepPasswordChangeMenu:
+		return "Voulez-vous changer votre mot de passe ?\n\n1️⃣ Oui\n2️⃣ Non\n\nRépondez avec le numéro de votre choix."
+	default:
+		return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
+	}
+	return ""
+}
+
+func formatDate(dateStr string) string {
+	if dateStr == "" {
+		return ""
+	}
+	parts := strings.Split(dateStr, "-")
+	if len(parts) != 3 {
+		return dateStr
+	}
+	return fmt.Sprintf("%s/%s/%s", parts[2], parts[1], parts[0])
+}
+
+func formatTime(timeStr string) string {
+	if timeStr == "" {
+		return ""
+	}
+	parts := strings.Split(timeStr, ":")
+	if len(parts) < 2 {
+		return timeStr
+	}
+	hour := parts[0]
+	minute := parts[1]
+	if len(hour) == 1 {
+		hour = "0" + hour
+	}
+	if len(minute) == 1 {
+		minute = "0" + minute
+	}
+	return fmt.Sprintf("%sh%s", hour, minute)
+}
+
+func calculateDuration(startTimeStr, endTimeStr string) string {
+	if startTimeStr == "" || endTimeStr == "" {
+		return ""
+	}
+
+	startParts := strings.Split(startTimeStr, ":")
+	if len(startParts) < 2 {
+		return ""
+	}
+	startHour, err1 := strconv.Atoi(startParts[0])
+	startMinute, err2 := strconv.Atoi(startParts[1])
+	if err1 != nil || err2 != nil {
+		return ""
+	}
+
+	endParts := strings.Split(endTimeStr, ":")
+	if len(endParts) < 2 {
+		return ""
+	}
+	endHour, err3 := strconv.Atoi(endParts[0])
+	endMinute, err4 := strconv.Atoi(endParts[1])
+	if err3 != nil || err4 != nil {
+		return ""
+	}
+
+	startTotal := startHour*60 + startMinute
+	endTotal := endHour*60 + endMinute
+
+	if endTotal < startTotal {
+		endTotal += 24 * 60
+	}
+
+	durationMinutes := endTotal - startTotal
+	durationHours := durationMinutes / 60
+	durationMins := durationMinutes % 60
+
+	return fmt.Sprintf("%dh%02d", durationHours, durationMins)
+}
+
+func formatMyTickets(tickets []CreatedTicket) string {
+	if len(tickets) == 0 {
+		return "Aucun billet trouvé."
+	}
+	var b strings.Builder
+	b.WriteString("Voici vos billets :\n\n")
+	for i, t := range tickets {
+		b.WriteString(fmt.Sprintf("%s Billet %d\n", numberEmoji(i+1), i+1))
+		b.WriteString(fmt.Sprintf("   Passenger : %s\n", t.PassengerName))
+		b.WriteString(fmt.Sprintf("   Siège     : %s\n", t.SeatNumber))
+		b.WriteString(fmt.Sprintf("   Prix      : %.2f USD\n", t.Price))
+		b.WriteString(fmt.Sprintf("   Télécharger : %s\n\n", t.DownloadURL))
+	}
+	return b.String()
+}
+
+func RegisterHandlers() {
+	log.Printf("[INFO] Registering WhatsApp event handlers")
+	Client.AddEventHandler(func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.Message:
+			text := extractText(v)
+			if text == "" {
+				return
+			}
+			log.Printf("Received message from %s: %q", v.Info.Sender.User, text)
+			handleIncomingMessage(v)
+		}
+	})
+}
+
+// TODO: Test edit
+func handleIncomingMessage(evt *events.Message) {
+	if evt.Info.IsFromMe {
+		return
+	}
+
+	text := strings.TrimSpace(extractText(evt))
+	if text == "" {
+		return
+	}
+
+	sender := evt.Info.Sender
+	phone := sender.User
+	session := getSession(phone)
+	log.Printf("Handling message for phone %s, current step %s, text: %q", phone, session.Step, text)
+
+	reply := process(phone, session, text, sender)
+	saveSession(phone, session)
+	SendText(sender, reply)
+}
+
+func process(phone string, s *Session, text string, sender types.JID) string {
+	log.Printf("Processing message for phone %s, current step %s, text: %q", phone, s.Step, text)
+	lower := strings.ToLower(text)
+	// Handle back navigation
+	if lower == "0" || lower == "retour" {
+		GoBack(phone)
+		return getPromptForStep(s)
+	}
+	if lower == "menu" || lower == "annuler" {
+		resetSession(phone)
+		return welcomeMenu
+	}
+
+	switch s.Step {
+	case StepMenu:
+		switch text {
+		case "1":
+			s.PreviousStep = s.Step
+			s.Step = StepSearchOrigin
+			return getPromptForStep(s)
+		case "2":
+			agencies, err := getActiveAgencies()
+			if err != nil {
+				return "Erreur lors de la récupération des agences. Tapez *menu* pour réessayer."
+			}
+			log.Printf("Found %d active agencies for phone %s", len(agencies), phone)
+			if len(agencies) == 0 {
+				return "Aucune agence active trouvée. Tapez *menu* pour réessayer."
+			}
+			s.Agencies = agencies
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyChoice
+			return getPromptForStep(s)
+		case "3":
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyName
+			return getPromptForStep(s)
+		case "4":
+			// Aide & Assistance
+			return "📞 Pour toute assistance ou information, notre service client est à votre disposition :\n- Ligne directe & WhatsApp : +243974645174\n- Email : ayaletrans@gmail.com"
+		default:
+			return welcomeMenu
+		}
+
+	case StepSearchOrigin:
+		// Validate origin input
+		if strings.TrimSpace(text) == "" {
+			return "Veuillez entrer un lieu de départ valide."
+		}
+		s.Origin = strings.TrimSpace(text)
+		s.PreviousStep = s.Step
+		s.Step = StepSearchDestination
+		return getPromptForStep(s)
+
+	case StepSearchDestination:
+		// Validate destination input
+		if strings.TrimSpace(text) == "" {
+			return "Veuillez entrer un lieu de destination valide."
+		}
+		s.Destination = strings.TrimSpace(text)
+		s.PreviousStep = s.Step
+		s.Step = StepSearchDateChoice
+		return getPromptForStep(s)
+
+	case StepSearchDateChoice:
+		if text == "1" {
+			s.Date = time.Now().Format("2006-01-02")
+			s.PreviousStep = s.Step
+			s.Step = StepSearchResults // We'll handle the search in the next step
+			// We need to do the search and then return the prompt for StepSearchResults
+			// But note: we are changing the step to StepSearchResults, so we will return the prompt for that step.
+			// However, we need to run the search first to populate s.Results.
+			// Let's do the search now and then return the prompt for StepSearchResults.
+			results, err := SearchJourneys(s.Origin, s.Destination, s.Date)
+			if err == nil && len(results) > 0 {
+				s.Results = results
+				return formatResults(results)
+			}
+			var suggestions []JourneyResult
+			sameRoute, _ := SearchUpcomingJourneys(s.Origin, s.Destination, 5)
+			suggestions = append(suggestions, sameRoute...)
+			otherRoutes, _ := SearchJourneysOnDate(s.Date, 5)
+			for _, r := range otherRoutes {
+				found := false
+				for _, existing := range suggestions {
+					if existing.ID == r.ID {
+						found = true
+						break
+					}
+				}
+				if !found {
+					suggestions = append(suggestions, r)
+				}
+			}
+			if len(suggestions) == 0 {
+				resetSession(phone)
+				return "Aucun voyage trouvé pour ce trajet ni pour cette date. Tapez *menu* pour recommencer."
+			}
+			s.Results = suggestions
+			return fmt.Sprintf("Aucun voyage trouvé pour %s → %s le %s.\nVoici d'autres voyages disponibles :\n\n%s",
+				s.Origin, s.Destination, s.Date, formatResults(suggestions))
+		}
+		if text == "2" {
+			s.PreviousStep = s.Step
+			s.Step = StepSearchDate
+			return getPromptForStep(s)
+		}
+		return "Choix invalide. Tapez 1 pour aujourd'hui ou 2 pour saisir une date."
+
+	case StepSearchDate:
+		date := parseDate(text)
+		if date == "" {
+			return "Format de date invalide. Essayez par exemple 13/09/2026 ou 13 septembre 2026."
+		}
+		s.Date = date
+		s.PreviousStep = s.Step
+		s.Step = StepSearchResults
+		// We need to do the search and then return the prompt for StepSearchResults
+		results, err := SearchJourneys(s.Origin, s.Destination, s.Date)
+		if err == nil && len(results) > 0 {
+			s.Results = results
+			return formatResults(results)
+		}
+		var suggestions []JourneyResult
+		var sameRoute []JourneyResult
+		var otherRoutes []JourneyResult
+		sameRoute, _ = SearchUpcomingJourneys(s.Origin, s.Destination, 5)
+		suggestions = append(suggestions, sameRoute...)
+		otherRoutes, _ = SearchJourneysOnDate(s.Date, 5)
+		for _, r := range otherRoutes {
+			found := false
+			for _, existing := range suggestions {
+				if existing.ID == r.ID {
+					found = true
+					break
+				}
+			}
+			if !found {
+				suggestions = append(suggestions, r)
+			}
+		}
+		if len(suggestions) == 0 {
+			resetSession(phone)
+			return "Aucun voyage trouvé pour ce trajet ni pour cette date. Tapez *menu* pour recommencer."
+		}
+		s.Results = suggestions
+		return fmt.Sprintf("Aucun voyage trouvé pour %s → %s le %s.\nVoici d'autres voyages disponibles :\n\n%s",
+			s.Origin, s.Destination, s.Date, formatResults(suggestions))
+
+	case StepSearchResults:
+		idx, err := strconv.Atoi(text)
+		if err != nil || idx < 1 || idx > len(s.Results) {
+			return "Numéro invalide. Choisissez un numéro dans la liste, ou tapez *menu* pour recommencer."
+		}
+		selected := s.Results[idx-1]
+		s.SelectedJourneyID = selected.ID
+		s.SelectedJourney = selected
+		s.PreviousStep = s.Step
+		s.Step = StepSeatsCount
+		return getPromptForStep(s)
+
+	case StepSeatsCount:
+		n, err := strconv.Atoi(text)
+		if err != nil || n < 1 || n > 10 {
+			return "Entrez un nombre valide de sièges (entre 1 et 10)."
+		}
+		s.SeatsNeeded = n
+		s.Passengers = make([]PassengerDraft, 0, n)
+		s.CurrentPassengerIndex = 0
+		s.PreviousStep = s.Step
+		s.Step = StepPassengerName
+		return getPromptForStep(s)
+
+	case StepPassengerName:
+		// Validate name is not empty
+		if strings.TrimSpace(text) == "" {
+			return "Veuillez entrer un nom valido."
+		}
+		s.Passengers = append(s.Passengers, PassengerDraft{Name: strings.TrimSpace(text)})
+		s.PreviousStep = s.Step
+		s.Step = StepPassengerPhone
+		return getPromptForStep(s)
+
+	case StepPassengerPhone:
+		idx := len(s.Passengers) - 1
+		if text != "*" {
+			if _, err := strconv.Atoi(text); err != nil {
+				return "Numéro de téléphone invalide. Veuillez entrer uniquement des chiffres (ex: 243XXXXXXXXX) ou * pour passer."
+			}
+			if len(text) < 10 {
+				return "Numéro de téléphone trop court. Veuillez entrer un numéro complet avec l'indicatif pays (ex: 243XXXXXXXXX) ou * pour passer."
+			}
+			s.Passengers[idx].Phone = strings.TrimSpace(text)
+		}
+		s.CurrentPassengerIndex++
+		if s.CurrentPassengerIndex < s.SeatsNeeded {
+			s.PreviousStep = s.Step
+			s.Step = StepPassengerName
+			return getPromptForStep(s)
+		}
+		s.PreviousStep = s.Step
+		s.Step = StepConfirm
+		return getPromptForStep(s)
+
+	case StepConfirm:
+		if strings.ToLower(text) != "oui" {
+			resetSession(phone)
+			return "Réservation annulée. Tapez *menu* pour recommencer."
+		}
+		bookedSeats, _ := GetBookedSeats(s.SelectedJourneyID)
+		assignSeats(s.Passengers, bookedSeats)
+		s.PreviousStep = s.Step
+		s.Step = StepPaymentMethodChoice
+		return getPromptForStep(s)
+
+	case StepPaymentMethodChoice:
+		switch text {
+		case "1": // Cash payment
+			// Process cash payment immediately
+			guestName := s.Passengers[0].Name
+			guestEmail := fmt.Sprintf("whatsapp+%s@ayaletrans.local", phone)
+
+			tickets, ref, err := CreateGuestBooking(s.SelectedJourneyID, guestName, guestEmail, s.Passengers, AppURL)
+			if err != nil {
+				resetSession(phone)
+				return "Erreur lors de la réservation : " + err.Error() + "\nTapez *menu* pour réessayer."
+			}
+
+			sendTicketCard(sender, ref, s.SelectedJourney, tickets[0])
+
+			baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+			totalAmountUSD := baseAmountUSD
+			rate, err := utils.GetCurrentExchangeRate(DB)
+			if err != nil {
+				log.Printf("Error getting exchange rate: %v, using default 2850", err)
+				rate = 2850
+			}
+			totalAmountCDF := baseAmountUSD * rate
+			cashMsg := fmt.Sprintf("✅ Votre réservation est confirmée ! Votre carte de billet a été générée ci-dessus.\n\n💰 Montant total à payer : %.2f USD / %.2f CDF\n\n💰 Paiement en attente : Veuillez effectuer le paiement cash au guichet avant le départ pour valider définitivement votre billet.\n🎫 Montrez ce billet à l'embarquement.\n💡 Note : Les passagers payant par Mobile Money ou Carte sont priorit�res sur les places disponibles.", totalAmountUSD, totalAmountCDF)
+
+			resetSession(phone)
+			return cashMsg
+
+		case "2": // Mobile Money
+			s.PaymentMethod = "mobile"
+			s.PreviousStep = s.Step
+			s.Step = StepCurrencyChoice
+			return getPromptForStep(s)
+
+		case "3": // Card payment
+			s.PaymentMethod = "card"
+			s.PreviousStep = s.Step
+			s.Step = StepCurrencyChoice
+			return getPromptForStep(s)
+
+		default:
+			return "Choix invalide. Tapez 1 pour espèces, 2 pour Mobile Money ou 3 pour carte."
+		}
+
+	case StepCurrencyChoice:
+		switch text {
+		case "1":
+			s.Currency = "USD"
+			s.PreviousStep = s.Step
+			s.Step = StepPhonePaymentChoice
+			return getPromptForStep(s)
+		case "2":
+			s.Currency = "CDF"
+			s.PreviousStep = s.Step
+			s.Step = StepPhonePaymentChoice
+			return getPromptForStep(s)
+		default:
+			return "Choix invalide. Répondez avec le numéro de votre choix."
+		}
+
+	case StepPhonePaymentChoice:
+		switch text {
+		case "1": // Use WhatsApp number
+			// Don't store anything special - we'll get the real number during confirmation
+			s.PreviousStep = s.Step
+			s.Step = StepPaymentProcessing
+			return getPromptForStep(s)
+		case "2": // Enter another number
+			s.PreviousStep = s.Step
+			s.Step = StepFlexPayPhoneInput
+			return getPromptForStep(s)
+		default:
+			return "Choix invalide. Répondez avec le numéro de votre choix."
+		}
+
+	case StepFlexPayPhoneInput:
+		trimmedText := strings.TrimSpace(text)
+		if trimmedText == "" {
+			// Ask again for the number
+			return "Entrez le numéro de téléphone pour Mobile Money (format : 243XXXXXXXXX) :"
+		}
+
+		// Validate format: should start with 243 and be 12 digits total (243 + 9 digits)
+		if !strings.HasPrefix(trimmedText, "243") || len(trimmedText) != 12 {
+			return "Numéro de téléphone invalide. Format attendu : 243XXXXXXXXX (12 chiffres commençant par 243)"
+		}
+		// Check if all characters are digits
+		if _, err := strconv.Atoi(trimmedText); err != nil {
+			return "Numéro de téléphone invalide. Veuillez entrer uniquement des chiffres."
+		}
+
+		// Store the number for mobile money
+		if s.PaymentMethod == "mobile" {
+			s.PaymentPhone = trimmedText
+		}
+
+		// Go to confirmation step
+		s.PreviousStep = s.Step
+		s.Step = StepPaymentProcessing
+		return getPromptForStep(s)
+
+	case StepPaymentProcessing:
+		// Handle confirmation: 1 = Oui (Validate), 2 = Non (Cancel)
+		if text == "1" {
+			// User confirmed - go to processing wait state
+			s.PreviousStep = s.Step
+			s.Step = StepPaymentProcessingWait
+			return getPromptForStep(s)
+		} else if text == "2" {
+			// User cancelled
+			resetSession(phone)
+			return "Paiement annulé. Tapez *menu* pour revenir au menu principal."
+		} else {
+			// Invalid input
+			return "Choix invalide. Répondez par :\n1️⃣ Oui pour valider\n2️⃣ Non pour annuler"
+		}
+
+	case StepPaymentProcessingWait:
+		// Process the payment
+		switch s.PaymentMethod {
+		case "mobile":
+			// For mobile money, we need to determine the phone number to use
+			var paymentPhone string
+			if s.PaymentPhone != "" {
+				paymentPhone = s.PaymentPhone
+			} else {
+				// Use WhatsApp number
+				paymentPhone = GetRealPhoneNumber(Client, types.JID{User: s.UserPhone, Server: "s.whatsapp.net"})
+				if paymentPhone == "" {
+					paymentPhone = s.UserPhone // fallback
+				}
+			}
+
+			// Initiate mobile money payment
+			_, _, err := InitiateMobileMoneyPayment(s.SelectedJourneyID, s.SelectedJourney, s.Passengers, paymentPhone, s.UserPhone, s.Currency, sender.String())
+			if err != nil {
+				resetSession(phone)
+				return "Erreur lors de la création du paiement Mobile Money : " + err.Error() + "\nTapez *menu* pour réessayer."
+			}
+		case "card":
+			// For card payment
+			_, _, err := InitiateOnlinePayment(s.SelectedJourneyID, s.SelectedJourney, s.Passengers, s.UserPhone, s.Currency, sender.String(), s.UserPhone)
+			if err != nil {
+				resetSession(phone)
+				return "Erreur lors de la création du paiement : " + err.Error() + "\nTapez *menu* pour réessayer."
+			}
+		default:
+			resetSession(phone)
+			return "Méthode de paiement inconnue. Tapez *menu* pour réessayer."
+		}
+
+		// Payment initiated successfully - go to completed state
+		s.PreviousStep = s.Step
+		s.Step = StepPaymentCompleted
+		return getPromptForStep(s)
+
+	case StepPaymentCompleted:
+		// Show USSD message and reset session
+		resetSession(phone)
+		return getPromptForStep(s)
+
+	default:
+		return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
+	}
+	return ""
+}
+
+// Helper functions - must be at package level in Go
+func extractText(evt *events.Message) string {
+	msg := evt.Message
+	if msg.GetConversation() != "" {
+		return strings.TrimSpace(msg.GetConversation())
+	}
+	if msg.GetExtendedTextMessage() != nil {
+		return strings.TrimSpace(msg.GetExtendedTextMessage().GetText())
+	}
+	return ""
+}
+
+func SendText(to types.JID, text string) {
+	log.Printf("[INFO] Sending WhatsApp message to %s: %s", to, text)
+	msg := buildTextMessage(text)
+	if _, err := Client.SendMessage(context.Background(), to, msg); err != nil {
+		log.Printf("[ERROR] Failed to send WhatsApp message to %s: %v", to, err)
+	}
+}
+
+func getActiveAgencies() ([]Agency, error) {
+	var agencies []Agency
+	err := DB.Select(&agencies, `SELECT id, name FROM organizations WHERE is_active = true ORDER BY name`)
+	if err != nil {
+		return nil, err
+	}
+	return agencies, nil
+}
+
+func assignSeats(passengers []PassengerDraft, bookedSeats []string) {
+	taken := map[string]bool{}
+	for _, s := range bookedSeats {
+		taken[s] = true
+	}
+	seatNum := 1
+	for i := range passengers {
+		for {
+			candidate := fmt.Sprintf("%d", seatNum)
+			if !taken[candidate] {
+				passengers[i].SeatNumber = candidate
+				taken[candidate] = true
+				seatNum++
+				break
+			}
+			seatNum++
+		}
+	}
+}
+
+func buildTextMessage(text string) *waE2E.Message {
+	return &waE2E.Message{
+		Conversation: proto.String(text),
+	}
+}
+
+func sendTicketCard(to types.JID, ref string, j JourneyResult, t CreatedTicket) {
+	imgBytes, err := renderTicketCard(
+		j.AgencyName, ref, j.Origin, j.Destination, j.Date, j.Time, j.ArrivalTime,
+		t.PassengerName, t.PassengerPhone, t.SeatNumber, t.Price, "Active",
+		j.BusRegistration, j.AgencyPhone, t.QRToken,
+	)
+	if err != nil {
+		sendTicketImage(to, t)
+		return
+	}
+
+	uploaded, err := Client.Upload(context.Background(), imgBytes, whatsmeow.MediaImage)
+	if err != nil {
+		return
+	}
+
+	caption := fmt.Sprintf("🎫 Billet PDF : %s", t.DownloadURL)
+
+	imgMsg := &waE2E.ImageMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String("image/png"),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uploaded.FileLength),
+		Caption:       proto.String(caption),
+	}
+
+	Client.SendMessage(context.Background(), to, &waE2E.Message{ImageMessage: imgMsg})
+}
+
+func sendTicketImage(to types.JID, t CreatedTicket) {
+	qrPNG, err := qrcode.Encode(t.QRToken, qrcode.Medium, 400)
+	if err != nil {
+		return
+	}
+
+	uploaded, err := Client.Upload(context.Background(), qrPNG, whatsmeow.MediaImage)
+	if err != nil {
+		return
+	}
+
+	caption := fmt.Sprintf("🎫 %s — Siège %s — %.0f USD\nBillet PDF : %s\nMontrez ce QR code à l'embarquement.",
+		t.PassengerName, t.SeatNumber, t.Price, t.DownloadURL)
+
+	imgMsg := &waE2E.ImageMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String("image/png"),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uploaded.FileLength),
+		Caption:       proto.String(caption),
+	}
+
+	Client.SendMessage(context.Background(), to, &waE2E.Message{ImageMessage: imgMsg})
+}
+
+// Additional helper functions
+var digitEmojis = []string{"0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"}
+
+func numberEmoji(n int) string {
+	if n == 10 {
+		return "🔟"
+	}
+	if n >= 0 && n < 10 {
+		return digitEmojis[n]
+	}
+	var b strings.Builder
+	for _, c := range strconv.Itoa(n) {
+		b.WriteString(digitEmojis[c-'0'])
+	}
+	return b.String()
+}
+
+func formatResults(results []JourneyResult) string {
+	var b strings.Builder
+	b.WriteString("🚌 Liste des voyages disponibles :\n\n")
+	for i, r := range results {
+		departDateFormatted := formatDate(r.Date)
+		arriveDateFormatted := formatDate(r.ArrivalDate)
+		departTimeFormatted := formatTime(r.Time)
+		arriveTimeFormatted := formatTime(r.ArrivalTime)
+		duration := calculateDuration(r.Time, r.ArrivalTime)
+		priceCDF := r.Price * 2850
+
+		b.WriteString(fmt.Sprintf("%s %s → %s\n• Agence : %s\n• 🚀 Départ : %s à %s\n• 🏁 Arrivée : %s à %s\n• ⏱️ Durée estimée : %s\n• 💰 Prix : %.0f USD / %.0f CDF\n\n",
+			numberEmoji(i+1), r.Origin, r.Destination, r.AgencyName,
+			departDateFormatted, departTimeFormatted,
+			arriveDateFormatted, arriveTimeFormatted,
+			duration,
+			r.Price, priceCDF))
+	}
+	b.WriteString("Tapez le numéro du voyage choisi.")
+	return b.String()
+}
+
+func buildConfirmSummary(s *Session) string {
+	var b strings.Builder
+	b.WriteString("Récapitulatif :\n")
+	for _, p := range s.Passengers {
+		b.WriteString(fmt.Sprintf("- %s (%s)\n", p.Name, valueOr(p.Phone, "sans téléphone")))
+	}
+	baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+	totalAmountUSD := baseAmountUSD
+	totalAmountCDF := baseAmountUSD * 2850
+	b.WriteString(fmt.Sprintf("\nMontant total à payer : %.2f USD / %.2f CDF\n\n", totalAmountUSD, totalAmountCDF))
+	b.WriteString("\nConfirmez-vous la réservation ? (oui/non)")
+	return b.String()
+}
+
+func valueOr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func parseDate(input string) string {
+	input = strings.TrimSpace(input)
+	lower := strings.ToLower(input)
+
+	for _, sep := range []string{"/", "-", "."} {
+		if strings.Contains(input, sep) {
+			parts := strings.Split(input, sep)
+			if len(parts) == 3 {
+				day, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+				month, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+				year, err3 := strconv.Atoi(strings.TrimSpace(parts[2]))
+				if err1 == nil && err2 == nil && err3 == nil && day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2020 {
+					return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+				}
+			}
+		}
+	}
+
+	fields := strings.Fields(lower)
+	if len(fields) == 3 {
+		day, err1 := strconv.Atoi(fields[0])
+		month, ok := frenchMonths[fields[1]]
+		year, err2 := strconv.Atoi(fields[2])
+		if err1 == nil && ok && err2 == nil && day >= 1 && day <= 31 && year >= 2020 {
+			return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+		}
+	}
+
+	return ""
+}
+
+var frenchMonths = map[string]int{
+	"janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
+	"mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
+	"septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
