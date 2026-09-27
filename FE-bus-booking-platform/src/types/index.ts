@@ -3,7 +3,7 @@ export interface User {
   email: string
   full_name: string
   phone?: string
-  role: "owner" | "passenger"
+  role: "owner" | "passenger" | "platform_admin"
   organization_id?: string
   is_verified: boolean
   created_at: string
@@ -51,6 +51,15 @@ export interface Stop {
   stop_price: number
 }
 
+export interface Organization {
+  id: string
+  name: string
+  email: string
+  phone?: string
+  logo_url?: string
+  is_active: boolean
+}
+
 export interface Journey {
   id: string
   organization_id: string
@@ -63,6 +72,7 @@ export interface Journey {
   status: "scheduled" | "boarding" | "departed" | "completed" | "cancelled"
   route?: Route
   bus?: Bus
+  organization?: Organization
   created_at: string
 }
 

@@ -35,7 +35,7 @@ export default function Routes() {
     if (!confirm("Delete this route?")) return
     try {
       await api.delete(`/routes/${id}`)
-      setRoutes(routes.filter((r) => r.id !== id))
+      setRoutes((routes ?? []).filter((r) => r.id !== id))
     } catch (err) {
       alert((err as Error).message)
     }
@@ -59,22 +59,22 @@ export default function Routes() {
             <div>
               <label htmlFor="route-name" className="text-sm font-medium text-gray-700">Route Name</label>
               <input id="route-name" name="name" required value={form.name} onChange={(e) => setForm({ ...form, name: e.target.value })}
-                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Casablanca → Tangier" />
+                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Kinshasa → Lubumbashi" />
             </div>
             <div>
-              <label htmlFor="route-price" className="text-sm font-medium text-gray-700">Base Price (MAD)</label>
+              <label htmlFor="route-price" className="text-sm font-medium text-gray-700">Base Price (USD)</label>
               <input id="route-price" name="base_price" type="number" required min={0} value={form.base_price} onChange={(e) => setForm({ ...form, base_price: parseFloat(e.target.value) })}
                 className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" />
             </div>
             <div>
               <label htmlFor="route-origin" className="text-sm font-medium text-gray-700">Origin</label>
               <input id="route-origin" name="origin" required value={form.origin} onChange={(e) => setForm({ ...form, origin: e.target.value })}
-                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Casablanca" />
+                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Kinshasa" />
             </div>
             <div>
               <label htmlFor="route-destination" className="text-sm font-medium text-gray-700">Destination</label>
               <input id="route-destination" name="destination" required value={form.destination} onChange={(e) => setForm({ ...form, destination: e.target.value })}
-                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Tangier" />
+                className="mt-1 w-full px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500" placeholder="Lubumbashi" />
             </div>
           </div>
 
@@ -103,16 +103,16 @@ export default function Routes() {
       )}
 
       <div className="space-y-4">
-        {routes.map((route) => (
+        {routes?.map((route) => (
           <div key={route.id} className="bg-white p-5 rounded-xl border border-gray-200">
             <div className="flex items-start justify-between">
               <div>
                 <h3 className="font-semibold text-lg">{route.name}</h3>
                 <p className="text-sm text-gray-500">{route.origin} → {route.destination}</p>
-                <p className="text-sm font-medium text-blue-600">{route.base_price} MAD base</p>
+                <p className="text-sm font-medium text-blue-600">{route.base_price} USD base</p>
                 {route.stops?.length > 0 && (
                   <div className="flex items-center gap-2 mt-2 text-xs text-gray-500">
-                    <MapPin className="h-3 w-3" /> {route.stops.length} stops
+                    <MapPin className="h-3 w-3" /> {route.stops?.length ?? 0} stops
                   </div>
                 )}
               </div>
@@ -120,7 +120,7 @@ export default function Routes() {
             </div>
           </div>
         ))}
-        {routes.length === 0 && !showForm && (
+        {(routes?.length ?? 0) === 0 && !showForm && (
           <p className="text-gray-500 text-center py-8">No routes yet. Create your first route!</p>
         )}
       </div>

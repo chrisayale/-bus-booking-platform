@@ -20,7 +20,7 @@ export default function Journeys() {
       api.get<Route[]>("/routes"),
     ]).then(([j, b, r]) => {
       setJourneys(j)
-      setBuses(b.filter((x) => x.is_active))
+      setBuses((b ?? []).filter((x) => x.is_active))
       setRoutes(r)
     }).catch(console.error)
   }, [])
@@ -70,12 +70,12 @@ export default function Journeys() {
             <select id="journey-route" name="route_id" required value={form.route_id} onChange={(e) => setForm({ ...form, route_id: e.target.value })}
               className="px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">Select Route</option>
-              {routes.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.origin}→{r.destination})</option>)}
+              {routes?.map((r) => <option key={r.id} value={r.id}>{r.name} ({r.origin}→{r.destination})</option>)}
             </select>
             <select id="journey-bus" name="bus_id" required value={form.bus_id} onChange={(e) => setForm({ ...form, bus_id: e.target.value })}
               className="px-3 py-2 border border-gray-300 rounded-lg outline-none focus:ring-2 focus:ring-blue-500">
               <option value="">Select Bus</option>
-              {buses.map((b) => <option key={b.id} value={b.id}>{b.registration_number} ({b.capacity} seats)</option>)}
+              {buses?.map((b) => <option key={b.id} value={b.id}>{b.registration_number} ({b.capacity} seats)</option>)}
             </select>
             <div>
               <label htmlFor="journey-dep-date" className="text-xs text-gray-500">Departure Date</label>
@@ -106,7 +106,7 @@ export default function Journeys() {
       )}
 
       <div className="space-y-3">
-        {journeys.map((j) => (
+        {journeys?.map((j) => (
           <div key={j.id} className="bg-white p-5 rounded-xl border border-gray-200 flex items-center justify-between">
             <div className="flex items-center gap-4">
               <Calendar className="h-8 w-8 text-blue-500" />
@@ -135,7 +135,7 @@ export default function Journeys() {
             </div>
           </div>
         ))}
-        {journeys.length === 0 && !showForm && (
+        {(journeys?.length ?? 0) === 0 && !showForm && (
           <p className="text-gray-500 text-center py-8">No journeys scheduled yet.</p>
         )}
       </div>

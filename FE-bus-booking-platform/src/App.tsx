@@ -19,15 +19,20 @@ import RoutesPage from "./pages/b2b/Routes"
 import Journeys from "./pages/b2b/Journeys"
 import QRScan from "./pages/b2b/QRScan"
 import Admins from "./pages/b2b/Admins"
+import Passengers from "./pages/b2b/Passengers"
+import Revenue from "./pages/b2b/Revenue"
+import Counter from "./pages/b2b/Counter"
+import PlatformAdmin from "./pages/PlatformAdmin"
 import Search from "./pages/b2c/Search"
 import Booking from "./pages/b2c/Booking"
 import MyBookings from "./pages/b2c/MyBookings"
 
-function ProtectedRoute({ children, ownerOnly = false }: { children: React.ReactNode; ownerOnly?: boolean }) {
-  const { isAuthenticated, isOwner, isLoading } = useAuth()
+function ProtectedRoute({ children, ownerOnly = false, platformAdminOnly = false }: { children: React.ReactNode; ownerOnly?: boolean; platformAdminOnly?: boolean }) {
+  const { isAuthenticated, isOwner, isPlatformAdmin, isLoading } = useAuth()
   if (isLoading) return <div className="flex items-center justify-center min-h-screen"><div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>
   if (!isAuthenticated) return <Navigate to="/auth" replace />
   if (ownerOnly && !isOwner) return <Navigate to="/search" replace />
+  if (platformAdminOnly && !isPlatformAdmin) return <Navigate to="/search" replace />
   return <>{children}</>
 }
 
@@ -59,6 +64,10 @@ function AppRoutes() {
         <Route path="/owner/journeys" element={<ProtectedRoute ownerOnly><Journeys /></ProtectedRoute>} />
         <Route path="/owner/scan" element={<ProtectedRoute ownerOnly><QRScan /></ProtectedRoute>} />
         <Route path="/owner/admins" element={<ProtectedRoute ownerOnly><Admins /></ProtectedRoute>} />
+        <Route path="/owner/passengers" element={<ProtectedRoute ownerOnly><Passengers /></ProtectedRoute>} />
+        <Route path="/owner/revenue" element={<ProtectedRoute ownerOnly><Revenue /></ProtectedRoute>} />
+        <Route path="/owner/counter" element={<ProtectedRoute ownerOnly><Counter /></ProtectedRoute>} />
+        <Route path="/platform/pending-owners" element={<ProtectedRoute platformAdminOnly><PlatformAdmin /></ProtectedRoute>} />
       </Route>
     </Routes>
   )

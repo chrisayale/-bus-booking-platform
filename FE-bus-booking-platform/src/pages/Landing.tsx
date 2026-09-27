@@ -6,35 +6,34 @@ import {
 } from "lucide-react"
 
 const destinations = [
-  { city: "Casablanca", desc: "The white city by the Atlantic", descKey: "landing.destCasaDesc", image: "🇲🇦", color: "from-blue-500 to-cyan-400" },
-  { city: "Marrakech", desc: "The red city of wonders", descKey: "landing.destMarrakechDesc", image: "🏛️", color: "from-orange-500 to-rose-400" },
-  { city: "Tangier", desc: "Gateway to two continents", descKey: "landing.destTangierDesc", image: "🌊", color: "from-sky-500 to-indigo-400" },
-  { city: "Fes", desc: "The spiritual heart of Morocco", descKey: "landing.destFesDesc", image: "🕌", color: "from-amber-600 to-yellow-400" },
-  { city: "Rabat", desc: "The capital by the sea", descKey: "landing.destRabatDesc", image: "🏖️", color: "from-emerald-500 to-teal-400" },
-  { city: "Agadir", desc: "Sun, surf & southern charm", descKey: "landing.destAgadirDesc", image: "☀️", color: "from-travel-500 to-rose-500" },
+  { city: "Kinshasa", desc: "The lively capital on the Congo River", descKey: "landing.destCasaDesc", image: "🏙️", color: "from-blue-500 to-cyan-400" },
+  { city: "Lubumbashi", desc: "The mining heart of Katanga", descKey: "landing.destMarrakechDesc", image: "⛏️", color: "from-orange-500 to-rose-400" },
+  { city: "Goma", desc: "Between lake and volcano", descKey: "landing.destTangierDesc", image: "🌋", color: "from-sky-500 to-indigo-400" },
+  { city: "Bukavu", desc: "Gateway to Lake Kivu", descKey: "landing.destFesDesc", image: "🏞️", color: "from-amber-600 to-yellow-400" },
+  { city: "Kisangani", desc: "The gateway to the east", descKey: "landing.destRabatDesc", image: "🛶", color: "from-emerald-500 to-teal-400" },
+  { city: "Matadi", desc: "Port city on the river", descKey: "landing.destAgadirDesc", image: "⚓", color: "from-travel-500 to-rose-500" },
 ]
-
 const testimonials = [
   {
     name: "Amina B.",
     avatar: "👩🏾‍💼",
-    text: "I book my weekly trips from Casa to Rabat with BusBook. The QR tickets save so much time at the station!",
+    text: "I book my weekly trips from Kinshasa to Lubumbashi with BusBook. The QR tickets save so much time at the station!",
     rating: 5,
-    trip: "Casablanca → Rabat",
+    trip: "kinshasa → lubumbashi",
   },
   {
     name: "Youssef M.",
     avatar: "👨🏻‍💻",
-    text: "The seat selection is brilliant. I always pick the window seat on the Marrakech route — the Atlas views are stunning.",
+    text: "The seat selection is brilliant. I always pick the window seat on the Bukavu route — the lake views are stunning.",
     rating: 5,
-    trip: "Casablanca → Marrakech",
+    trip: "Goma → Bukavu",
   },
   {
     name: "Fatima Z.",
     avatar: "👩🏾‍🌾",
-    text: "Finally an app that makes bus travel easy in Morocco. My family and I use it for all our trips up north.",
+    text: "Finally an app that makes bus travel easy in kisangani. My family and I use it for all our trips up north.",
     rating: 5,
-    trip: "Fes → Tangier",
+    trip: "kisangani → matadi",
   },
 ]
 
@@ -73,26 +72,26 @@ function routePath(x1: number, y1: number, x2: number, y2: number) {
 }
 
 const cities = [
-  { name: "Tangier", x: 90, y: 30 },
-  { name: "Fes", x: 180, y: 60 },
-  { name: "Rabat", x: 105, y: 100 },
-  { name: "Casablanca", x: 95, y: 135 },
-  { name: "Marrakech", x: 130, y: 175 },
-  { name: "Agadir", x: 85, y: 230 },
+  { name: "Kinshasa", x: 60, y: 150 },
+  { name: "Lubumbashi", x: 290, y: 240 },
+  { name: "Goma", x: 330, y: 140 },
+  { name: "Bukavu", x: 320, y: 175 },
+  { name: "Kisangani", x: 200, y: 60 },
+  { name: "Matadi", x: 40, y: 200 },
 ]
 
 const routeConnections = [
-  { from: 0, to: 1, delay: 0 },
-  { from: 0, to: 2, delay: 0.2 },
-  { from: 1, to: 2, delay: 0.4 },
-  { from: 1, to: 4, delay: 0.6 },
+  { from: 0, to: 4, delay: 0 },
+  { from: 0, to: 5, delay: 0.2 },
+  { from: 4, to: 2, delay: 0.4 },
   { from: 2, to: 3, delay: 0.3 },
-  { from: 2, to: 4, delay: 0.5 },
-  { from: 3, to: 4, delay: 0.7 },
-  { from: 4, to: 5, delay: 0.8 },
+  { from: 2, to: 1, delay: 0.5 },
+  { from: 3, to: 1, delay: 0.6 },
+  { from: 4, to: 1, delay: 0.7 },
+  { from: 0, to: 1, delay: 0.8 },
 ]
 
-function MoroccoMap() {
+function CongoMap() {
   const { t } = useTranslate()
   return (
     <div className="relative">
@@ -284,12 +283,12 @@ function MoroccoMap() {
 }
 
 const defaultOrigins: Record<string, string> = {
-  Tangier: "Casablanca",
-  Fes: "Casablanca",
-  Rabat: "Casablanca",
-  Casablanca: "Rabat",
-  Marrakech: "Casablanca",
-  Agadir: "Marrakech",
+  Lubumbashi: "Kinshasa",
+  Goma: "Kinshasa",
+  Bukavu: "Goma",
+  Kisangani: "Kinshasa",
+  Matadi: "Kinshasa",
+  Kinshasa: "Lubumbashi",
 }
 
 export default function Landing() {
@@ -373,7 +372,7 @@ export default function Landing() {
             {/* Right column - Map Visual */}
             <div className="relative hidden lg:flex items-center justify-center animate-fade-in animate-delay-300">
               <div className="relative w-full max-w-md">
-                <MoroccoMap />
+               <CongoMap />
               </div>
             </div>
           </div>
@@ -403,7 +402,7 @@ export default function Landing() {
             {destinations.map((dest, idx) => (
               <button
                 key={dest.city}
-                onClick={() => navigate("/search", { state: { origin: defaultOrigins[dest.city] || "Casablanca", destination: dest.city } })}
+                onClick={() => navigate("/search", { state: { origin: defaultOrigins[dest.city] || "Kinshasa", destination: dest.city } })}
                 className="group relative overflow-hidden rounded-xl bg-white border border-gray-100 p-4 text-center
                   hover:shadow-lg hover:-translate-y-1 transition-all duration-300 cursor-pointer text-left"
                 style={{ animationDelay: `${idx * 80}ms` }}
@@ -534,11 +533,11 @@ export default function Landing() {
           <div className="flex flex-col md:flex-row items-center justify-between gap-4 text-sm text-gray-500">
             <div className="flex items-center gap-2">
               <Bus className="h-5 w-5 text-travel-500" />
-              <span className="font-semibold text-gray-700">Bus<span className="text-travel-500">Book</span></span>
+              <span className="font-semibold text-gray-700">Ayale<span className="text-travel-500">Trans</span></span>
               <span className="hidden sm:inline">&middot; {t("landing.footerTagline")}</span>
             </div>
             <div className="flex items-center gap-4">
-              <span>© {new Date().getFullYear()} BusBook</span>
+              <span>© {new Date().getFullYear()} AyaleTrans</span>
               <span className="text-gray-300">|</span>
               <span>{t("landing.footerMadeIn")}</span>
             </div>

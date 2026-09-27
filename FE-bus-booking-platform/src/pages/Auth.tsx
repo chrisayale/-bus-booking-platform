@@ -14,7 +14,9 @@ export default function Auth() {
   const [email, setEmail] = useState("")
   const [password, setPassword] = useState("")
   const [fullName, setFullName] = useState("")
-  const [phone, setPhone] = useState("")
+    const [phone, setPhone] = useState("")
+  const [role, setRole] = useState<"passenger" | "owner">("passenger")
+  const [agencyName, setAgencyName] = useState("")
 
   const dispatch = useDispatch<AppDispatch>()
   const { isLoading, error } = useSelector((state: RootState) => state.auth)
@@ -27,11 +29,22 @@ export default function Auth() {
       if (login.fulfilled.match(result)) {
         navigate(result.payload.role === "owner" ? "/owner/dashboard" : "/search")
       }
-    } else {
-      const result = await dispatch(register({ email, password, full_name: fullName, phone }))
+       } else {
+      const result = await dispatch(register({
+        email,
+        password,
+        full_name: fullName,
+        phone,
+        role,
+        agency_name: role === "owner" ? agencyName : undefined,
+      }))
       if (register.fulfilled.match(result)) {
         setMode("login")
-        alert("Account created! Please sign in.")
+        if (role === "owner") {
+          alert("Compte agence créé ! Il sera activé après validation par un administrateur.")
+        } else {
+          alert("Account created! Please sign in.")
+        }
       }
     }
   }
@@ -49,7 +62,7 @@ export default function Auth() {
           </Link>
           <h1 className="text-xl font-bold mt-4">
             <span className="text-gray-900">{t("auth.welcomeTo")} </span>
-            <span className="text-gradient">BusBook</span>
+            <span className="text-gradient">AyaleTrans</span>
           </h1>
           <p className="text-sm text-gray-500 mt-1">
             {mode === "login" ? t("auth.loginSubtitle") : t("auth.registerSubtitle")}
@@ -128,8 +141,48 @@ export default function Auth() {
               </div>
             )}
 
-            {mode === "register" && (
+                        {mode === "register" && (
               <>
+                <div className="flex bg-gray-100/80 rounded-xl p-1 mb-2">
+                  <button
+                    type="button"
+                    className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all duration-200 ${
+                      role === "passenger" ? "bg-white text-travel-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                    }`}
+                    onClick={() => setRole("passenger")}
+                  >
+                    Passager
+                  </button>
+                  <button
+                    type="button"
+                    className={`flex-1 py-2 text-sm font-medium rounded-lg transition-all duration-200 ${
+                      role === "owner" ? "bg-white text-travel-600 shadow-sm" : "text-gray-500 hover:text-gray-700"
+                    }`}
+                    onClick={() => setRole("owner")}
+                  >
+                    Agent propriétaire de bus
+                  </button>
+                </div>
+
+                {role === "owner" && (
+                  <div>
+                    <label htmlFor="auth-agencyname" className="text-sm font-medium text-gray-700">Nom de l'agence</label>
+                    <div className="relative mt-1">
+                      <Bus className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                      <input
+                        id="auth-agencyname"
+                        name="agency_name"
+                        type="text"
+                        required
+                        value={agencyName}
+                        onChange={(e) => setAgencyName(e.target.value)}
+                        className="w-full pl-10 pr-4 py-2.5 border border-gray-200 rounded-xl focus:ring-2 focus:ring-travel-400 focus:border-transparent outline-none bg-gray-50/50 transition-all duration-200"
+                        placeholder="Nom de votre agence"
+                      />
+                    </div>
+                  </div>
+                )}
+
                 <div>
                   <label htmlFor="auth-fullname" className="text-sm font-medium text-gray-700">{t("auth.fullName")}</label>
                   <div className="relative mt-1">

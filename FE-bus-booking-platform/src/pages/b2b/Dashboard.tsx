@@ -58,7 +58,7 @@ export default function OwnerDashboard() {
     { icon: Route, label: "Routes", value: stats.total_routes, sub: `${stats.total_journeys} total journeys`, color: "bg-green-500" },
     { icon: Calendar, label: "Upcoming Journeys", value: stats.upcoming_journeys, sub: "scheduled", color: "bg-purple-500" },
     { icon: Users, label: "Seat Occupancy", value: `${Math.round(stats.seat_occupancy)}%`, sub: `${stats.active_tickets} active tickets`, color: "bg-orange-500" },
-    { icon: TrendingUp, label: "Total Revenue", value: `${Math.round(stats.total_revenue)} MAD`, sub: `${stats.total_bookings} bookings`, color: "bg-emerald-500" },
+    { icon: TrendingUp, label: "Total Revenue", value: `${Math.round(stats.total_revenue)} USD`, sub: `${stats.total_bookings} bookings`, color: "bg-emerald-500" },
     { icon: MapPin, label: "Popular Routes", value: stats.popular_routes.length, sub: "top routes", color: "bg-rose-500" },
   ]
 
@@ -97,7 +97,7 @@ export default function OwnerDashboard() {
               <BarChart data={stats.monthly_revenue}>
                 <XAxis dataKey="month" tick={{ fontSize: 12 }} />
                 <YAxis tick={{ fontSize: 12 }} />
-                <Tooltip formatter={(value) => [`${Math.round(Number(value ?? 0))} MAD`, "Revenue"]} />
+                <Tooltip formatter={(value) => [`${Math.round(Number(value ?? 0))} USD`, "Revenue"]} />
                 <Bar dataKey="amount" fill="#3b82f6" radius={[4, 4, 0, 0]} />
               </BarChart>
             </ResponsiveContainer>

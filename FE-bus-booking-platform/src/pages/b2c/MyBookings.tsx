@@ -1,8 +1,10 @@
+
+
 import { useEffect, useState } from "react"
 import { api } from "../../api/client"
 import { useTranslate } from "../../hooks/useTranslate"
 import type { Booking, Ticket } from "../../types"
-import { Ticket as TicketIcon, XCircle, Trash2, Download, Bus, User, Armchair, Clock } from "lucide-react"
+import { Ticket as TicketIcon, XCircle, Trash2, Download, Bus, User, Armchair, Clock, Printer } from "lucide-react"
 import { QRCodeCanvas } from "qrcode.react"
 import { Link } from "react-router-dom"
 import { downloadTicketPdf } from "../../lib/ticketPdf"
@@ -90,7 +92,7 @@ export default function MyBookings() {
                 </span>
               </div>
               <div className="flex items-center gap-3">
-                <span className="text-white font-bold text-lg">{booking.total_amount} MAD</span>
+                <span className="text-white font-bold text-lg">{booking.total_amount} USD</span>
                 {booking.status === "cancelled" && (
                   <button
                     onClick={() => deleteBooking(booking.id)}
@@ -113,7 +115,8 @@ export default function MyBookings() {
                     ticket={ticket}
                     booking={booking}
                     downloading={downloadingTickets.has(ticket.id)}
-                    onDownload={() => handleDownload(ticket, booking, setDownloadingTickets)}
+                                        onDownload={() => handleDownload(ticket, booking, setDownloadingTickets)}
+                    onPrint={() => handleDownload(ticket, booking, setDownloadingTickets, "print")}
                     onCancel={() => cancelTicket(booking.id, ticket.id, ticket.status)}
                     statusLabel={statusLabel}
                     ticketStatusColors={ticketStatusColors}
@@ -149,7 +152,8 @@ export default function MyBookings() {
 async function handleDownload(
   ticket: Ticket,
   booking: Booking,
-  setDownloadingTickets: React.Dispatch<React.SetStateAction<Set<string>>>
+  setDownloadingTickets: React.Dispatch<React.SetStateAction<Set<string>>>,
+  mode: "download" | "print" = "download"
 ) {
   setDownloadingTickets((prev) => new Set(prev).add(ticket.id))
   try {
@@ -158,7 +162,23 @@ async function handleDownload(
     const qrCanvas = qrWrapper?.querySelector<HTMLCanvasElement>("canvas")
     if (!qrCanvas) console.warn("[PDF] QR canvas not found for ticket", ticket.id)
     const qrDataUrl = qrCanvas?.toDataURL("image/png")
-    await downloadTicketPdf({ ticket, booking, qrDataUrl })
+        await downloadTicketPdf({
+      ticket,
+      booking,
+      qrDataUrl,
+      journey: ticket.journey
+        ? {
+            origin: ticket.journey.route?.origin || "",
+            destination: ticket.journey.route?.destination || "",
+            date: ticket.journey.departure_date,
+            departure: ticket.journey.departure_time?.slice(0, 5),
+            arrival: ticket.journey.arrival_time?.slice(0, 5),
+          }
+        : undefined,
+      agencyName: ticket.journey?.organization?.name,
+      agencyPhone: ticket.journey?.organization?.phone,
+      busRegistration: ticket.journey?.bus?.registration_number,
+    }, mode)
   } catch (err) {
     alert("Failed to download ticket: " + (err as Error).message)
   } finally {
@@ -175,6 +195,7 @@ function TicketCard({
   booking,
   downloading,
   onDownload,
+  onPrint,
   onCancel,
   statusLabel,
   ticketStatusColors,
@@ -183,6 +204,7 @@ function TicketCard({
   booking: Booking
   downloading: boolean
   onDownload: () => void
+  onPrint: () => void
   onCancel: () => void
   statusLabel: (status: string) => string
   ticketStatusColors: Record<string, string>
@@ -220,7 +242,7 @@ function TicketCard({
               </div>
               <div className="text-right shrink-0">
                 <div className="text-lg font-bold text-blue-700">
-                  {ticket.price.toFixed(2)} MAD
+                  {ticket.price.toFixed(2)} USD
                 </div>
               </div>
             </div>
@@ -265,15 +287,25 @@ function TicketCard({
 
         {/* Actions */}
         <div className="flex items-center justify-end gap-2 pt-1">
-          {isActive && ticket.qr_token && (
-            <button
-              onClick={onDownload}
-              disabled={downloading}
-              className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition text-xs font-medium disabled:opacity-50"
-            >
-              <Download className="h-3.5 w-3.5" />
-              {downloading ? "..." : t("myBookings.download")}
-            </button>
+                 {isActive && ticket.qr_token && (
+            <>
+              <button
+                onClick={onDownload}
+                disabled={downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-emerald-50 text-emerald-700 hover:bg-emerald-100 border border-emerald-200 rounded-lg transition text-xs font-medium disabled:opacity-50"
+              >
+                <Download className="h-3.5 w-3.5" />
+                {downloading ? "..." : t("myBookings.download")}
+              </button>
+              <button
+                onClick={onPrint}
+                disabled={downloading}
+                className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-50 text-gray-700 hover:bg-gray-100 border border-gray-200 rounded-lg transition text-xs font-medium disabled:opacity-50"
+              >
+                <Printer className="h-3.5 w-3.5" />
+                Imprimer
+              </button>
+            </>
           )}
           {canCancel && (
             <button
@@ -289,3 +321,4 @@ function TicketCard({
     </div>
   )
 }
+

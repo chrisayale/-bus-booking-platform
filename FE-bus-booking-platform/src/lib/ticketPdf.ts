@@ -12,10 +12,13 @@ export interface TicketDownloadData {
     departure: string
     arrival: string
   }
+  agencyName?: string
+  agencyPhone?: string
+  busRegistration?: string
 }
 
-export async function downloadTicketPdf(data: TicketDownloadData): Promise<void> {
-  const { ticket, booking, journey } = data
+export async function downloadTicketPdf(data: TicketDownloadData, mode: "download" | "print" = "download"): Promise<void> {
+  const { ticket, booking, journey, agencyName, agencyPhone, busRegistration } = data
 
   // Colors
   const blue = [37, 99, 235] as const
@@ -68,8 +71,9 @@ export async function downloadTicketPdf(data: TicketDownloadData): Promise<void>
   doc.text("BUS", margin + 4, margin + 6.5)
 
   // Brand name
+   // Brand name
   doc.setFontSize(11)
-  doc.text("BusBook", margin + 13, margin + 6.5)
+  doc.text(agencyName || "AyaleTrans", margin + 13, margin + 6.5)
 
   // Booking reference
   doc.setFont("helvetica", "normal")
@@ -224,7 +228,7 @@ export async function downloadTicketPdf(data: TicketDownloadData): Promise<void>
   doc.setFont("helvetica", "bold")
   doc.setFontSize(16)
   doc.setTextColor(emerald600[0], emerald600[1], emerald600[2])
-  doc.text(`${ticket.price} MAD`, margin, infoY + 7)
+  doc.text(`${ticket.price} USD`, margin, infoY + 7)
 
   // Status badge (right side)
   const statusText = ticketStatusLabel
@@ -244,6 +248,12 @@ export async function downloadTicketPdf(data: TicketDownloadData): Promise<void>
   // =========================================================
   // FOOTER
   // =========================================================
+    // =========================================================
+  // AGENCY & BUS INFO
+  // =========================================================
+     // =========================================================
+  // FOOTER
+  // =========================================================
   const footerY = pageH - margin - 1
 
   doc.setFillColor(slate100[0], slate100[1], slate100[2])
@@ -255,7 +265,23 @@ export async function downloadTicketPdf(data: TicketDownloadData): Promise<void>
   doc.text("Present this ticket at boarding. Valid for the scheduled journey only.", pageW / 2, footerY, { align: "center" })
 
   // =========================================================
+  // AGENCY & BUS INFO
+  // =========================================================
+  const agencyInfoY = infoY + 10
+  doc.setFont("helvetica", "normal")
+  doc.setFontSize(7)
+  doc.setTextColor(slate500[0], slate500[1], slate500[2])
+  const busLine = busRegistration ? `Bus: ${busRegistration}` : ""
+  const phoneLine = agencyPhone ? `Tel: ${agencyPhone}` : ""
+  doc.text([busLine, phoneLine].filter(Boolean).join("   |   "), margin, agencyInfoY)
+
+  // =========================================================
   // SAVE
   // =========================================================
-  doc.save(`ticket-${booking.booking_reference}-seat-${ticket.seat_number}.pdf`)
+ if (mode === "print") {
+    doc.autoPrint()
+    window.open(doc.output("bloburl"), "_blank")
+  } else {
+    doc.save(`ticket-${booking.booking_reference}-seat-${ticket.seat_number}.pdf`)
+  }
 }

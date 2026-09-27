@@ -6,7 +6,7 @@ import { useAuth } from "../../hooks/useAuth"
 import { useTranslate } from "../../hooks/useTranslate"
 import type { RootState } from "../../store"
 import type { Booking, Ticket } from "../../types"
-import { ArrowLeft, Bus, User, Mail, CreditCard, CheckCircle, Download, ExternalLink, XCircle, MapPin, Clock, Compass } from "lucide-react"
+import { ArrowLeft, Bus, User, Mail, CreditCard, CheckCircle, Download, ExternalLink, XCircle, MapPin, Clock, Compass, Printer } from "lucide-react"
 import { QRCodeCanvas } from "qrcode.react"
 import { downloadTicketPdf } from "../../lib/ticketPdf"
 
@@ -135,25 +135,48 @@ export default function Booking() {
     }
   }
 
+  const buildTicketData = (ticket: Ticket) => {
+    const qrWrapper = document.querySelector(`[data-qr-for="${ticket.id}"]`)
+    const qrCanvas = qrWrapper?.querySelector<HTMLCanvasElement>("canvas")
+    const qrDataUrl = qrCanvas?.toDataURL("image/png")
+    return {
+      ticket,
+      booking: confirmedBooking!,
+      qrDataUrl,
+      journey: journey
+        ? {
+            origin: journey.route?.origin || journey.route?.name?.split(" → ")[0] || "",
+            destination: journey.route?.destination || journey.route?.name?.split(" → ")[1] || "",
+            date: journey.departure_date,
+            departure: journey.departure_time?.slice(0, 5),
+            arrival: journey.arrival_time?.slice(0, 5),
+          }
+        : undefined,
+      agencyName: journey?.organization?.name,
+      agencyPhone: journey?.organization?.phone,
+      busRegistration: journey?.bus?.registration_number,
+    }
+  }
+
   const handleDownloadTicket = async (ticket: Ticket) => {
     if (!confirmedBooking) return
     setDownloadingId(ticket.id)
     try {
-      await downloadTicketPdf({
-        ticket,
-        booking: confirmedBooking,
-        journey: journey
-          ? {
-              origin: journey.route?.origin || journey.route?.name?.split(" → ")[0] || "",
-              destination: journey.route?.destination || journey.route?.name?.split(" → ")[1] || "",
-              date: journey.departure_date,
-              departure: journey.departure_time?.slice(0, 5),
-              arrival: journey.arrival_time?.slice(0, 5),
-            }
-          : undefined,
-      })
+      await downloadTicketPdf(buildTicketData(ticket))
     } catch (err) {
       alert("Failed to download ticket: " + (err as Error).message)
+    } finally {
+      setDownloadingId(null)
+    }
+  }
+
+  const handlePrintTicket = async (ticket: Ticket) => {
+    if (!confirmedBooking) return
+    setDownloadingId(ticket.id)
+    try {
+      await downloadTicketPdf(buildTicketData(ticket), "print")
+    } catch (err) {
+      alert("Failed to print ticket: " + (err as Error).message)
     } finally {
       setDownloadingId(null)
     }
@@ -210,14 +233,14 @@ export default function Booking() {
               {/* QR Code */}
               <div className="flex flex-col items-center py-4 border-t border-dashed border-gray-200">
                 <p className="text-xs font-medium text-travel-600 mb-2">{t("myBookings.qrTicket")}</p>
-                <div className="bg-white p-3 rounded-xl shadow-md border border-gray-100">
+                                <div className="bg-white p-3 rounded-xl shadow-md border border-gray-100" data-qr-for={ticket.id}>
                   <QRCodeCanvas value={ticket.qr_token} size={200} level="M" includeMargin />
                 </div>
                 <p className="text-xs text-gray-400 mt-2">{t("myBookings.showToBoard")}</p>
               </div>
 
               {/* Actions */}
-              <div className="flex items-center gap-3 pt-4 border-t border-gray-100">
+                           <div className="flex items-center gap-3 pt-4 border-t border-gray-100">
                 <button
                   onClick={() => handleDownloadTicket(ticket)}
                   disabled={downloadingId === ticket.id}
@@ -226,6 +249,15 @@ export default function Booking() {
                 >
                   <Download className="h-4 w-4" />
                   {downloadingId === ticket.id ? t("common.loading") : t("myBookings.download")}
+                </button>
+                <button
+                  onClick={() => handlePrintTicket(ticket)}
+                  disabled={downloadingId === ticket.id}
+                  className="flex-1 flex items-center justify-center gap-2 bg-white border border-gray-200 text-gray-700 py-2.5 rounded-xl text-sm font-medium
+                    hover:bg-gray-50 transition-all duration-200 disabled:opacity-50 active:scale-[0.98]"
+                >
+                  <Printer className="h-4 w-4" />
+                  Imprimer
                 </button>
               </div>
             </div>

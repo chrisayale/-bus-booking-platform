@@ -4,12 +4,12 @@ import { useAuth } from "../hooks/useAuth"
 import { useTranslate } from "../hooks/useTranslate"
 import { logout } from "../store/authSlice"
 import {
-  Bus, Route, Calendar, QrCode, Search, Ticket, LayoutDashboard,
-  LogOut, User, Settings, Shield
+       Bus, Route, Calendar, QrCode, Search, Ticket, LayoutDashboard,
+  LogOut, User, Settings, Shield, Users, DollarSign, Store
 } from "lucide-react"
 
 export default function Layout() {
-  const { isAuthenticated, isOwner, user } = useAuth()
+    const { isAuthenticated, isOwner, isPlatformAdmin, user } = useAuth()
   const { t } = useTranslate()
   const dispatch = useDispatch()
   const navigate = useNavigate()
@@ -35,22 +35,29 @@ export default function Layout() {
                 <Bus className="h-5 w-5 text-white" aria-hidden="true" />
               </div>
               <span className="text-lg font-bold text-gray-900">
-                Bus<span className="text-travel-500">Book</span>
+                Ayale<span className="text-travel-500">Trans</span>
               </span>
             </Link>
 
             {/* Navigation */}
             <div className="hidden md:flex items-center gap-1">
-              {isAuthenticated ? (
+                           {isAuthenticated ? (
                 <>
-                  {isOwner ? (
+                  {isPlatformAdmin ? (
+                    <div className="flex items-center gap-1">
+                      <NavLink to="/platform/pending-owners" icon={Shield} label="Demandes agences" active={isActive("/platform/pending-owners")} />
+                    </div>
+                  ) : isOwner ? (
                     <div className="flex items-center gap-1">
                       <NavLink to="/owner/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} active={isActive("/owner/dashboard")} />
                       <NavLink to="/owner/buses" icon={Bus} label={t("nav.fleet")} active={isActive("/owner/buses")} />
                       <NavLink to="/owner/routes" icon={Route} label={t("nav.routes")} active={isActive("/owner/routes")} />
                       <NavLink to="/owner/journeys" icon={Calendar} label={t("nav.journeys")} active={isActive("/owner/journeys")} />
                       <NavLink to="/owner/scan" icon={QrCode} label={t("nav.qrScan")} active={isActive("/owner/scan")} />
-                      <NavLink to="/owner/admins" icon={Shield} label="Admins" active={isActive("/owner/admins")} />
+                                            <NavLink to="/owner/admins" icon={Shield} label="Admins" active={isActive("/owner/admins")} />
+                                           <NavLink to="/owner/passengers" icon={Users} label="Passagers" active={isActive("/owner/passengers")} />
+                                            <NavLink to="/owner/revenue" icon={DollarSign} label="Revenus" active={isActive("/owner/revenue")} />
+                      <NavLink to="/owner/counter" icon={Store} label="Guichet" active={isActive("/owner/counter")} />
                     </div>
                   ) : (
                     <div className="flex items-center gap-1">
@@ -114,13 +121,18 @@ export default function Layout() {
       {/* Mobile bottom nav */}
       {isAuthenticated && (
         <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-xl border-t border-gray-200 safe-area-bottom">
-          <div className="flex items-center justify-around py-2 px-2">
-            {isOwner ? (
+                    <div className="flex items-center gap-1 overflow-x-auto py-2 px-2">
+                    {isOwner ? (
               <>
                 <MobileNavLink to="/owner/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} active={isActive("/owner/dashboard")} />
                 <MobileNavLink to="/owner/buses" icon={Bus} label={t("nav.fleet")} active={isActive("/owner/buses")} />
+                <MobileNavLink to="/owner/routes" icon={Route} label={t("nav.routes")} active={isActive("/owner/routes")} />
                 <MobileNavLink to="/owner/journeys" icon={Calendar} label={t("nav.journeys")} active={isActive("/owner/journeys")} />
                 <MobileNavLink to="/owner/scan" icon={QrCode} label={t("nav.qrScan")} active={isActive("/owner/scan")} />
+                <MobileNavLink to="/owner/admins" icon={Shield} label="Admins" active={isActive("/owner/admins")} />
+                <MobileNavLink to="/owner/passengers" icon={Users} label="Passagers" active={isActive("/owner/passengers")} />
+                               <MobileNavLink to="/owner/revenue" icon={DollarSign} label="Revenus" active={isActive("/owner/revenue")} />
+                <MobileNavLink to="/owner/counter" icon={Store} label="Guichet" active={isActive("/owner/counter")} />
               </>
             ) : (
               <>

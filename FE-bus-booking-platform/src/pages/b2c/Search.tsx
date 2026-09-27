@@ -123,7 +123,7 @@ export default function Search() {
               </div>
               <div className="text-right flex items-center gap-4 flex-wrap">
                 <div>
-                  <p className="text-2xl font-bold text-gradient">{j.route?.base_price || "—"} MAD</p>
+                  <p className="text-2xl font-bold text-gradient">{j.route?.base_price || "—"} USD</p>
                   <p className="text-xs text-gray-400">{j.bus?.available_seats ?? "?"} {t("search.seatsLeft")}</p>
                 </div>
                 <button onClick={() => handleBook(j)}

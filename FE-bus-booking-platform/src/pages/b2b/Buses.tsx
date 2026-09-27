@@ -29,7 +29,7 @@ export default function Buses() {
     if (!confirm("Delete this bus?")) return
     try {
       await api.delete(`/buses/${id}`)
-      setBuses(buses.filter((b) => b.id !== id))
+      setBuses((buses ?? []).filter((b) => b.id !== id))
     } catch (err) {
       alert((err as Error).message)
     }
@@ -99,7 +99,7 @@ export default function Buses() {
       )}
 
       <div className="grid md:grid-cols-2 lg:grid-cols-3 gap-4">
-        {buses.map((bus) => (
+        {buses?.map((bus) => (
           <div key={bus.id} className="bg-white p-5 rounded-xl border border-gray-200 hover:shadow-sm transition">
             <div className="flex items-start justify-between">
               <div>
@@ -120,7 +120,7 @@ export default function Buses() {
             </span>
           </div>
         ))}
-        {buses.length === 0 && !showForm && (
+        {(buses?.length ?? 0) === 0 && !showForm && (
           <p className="text-gray-500 col-span-full text-center py-8">No buses yet. Add your first bus!</p>
         )}
       </div>

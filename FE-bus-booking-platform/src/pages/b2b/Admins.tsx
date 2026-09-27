@@ -191,10 +191,10 @@ export default function Admins() {
       <div className="bg-white rounded-xl border border-gray-200 overflow-hidden">
         <div className="px-6 py-4 border-b border-gray-100">
           <h2 className="font-semibold">Admin Users</h2>
-          <p className="text-xs text-gray-400 mt-0.5">{admins.length} admin(s) in your organization</p>
+          <p className="text-xs text-gray-400 mt-0.5">{admins?.length ?? 0} in your organization</p>
         </div>
 
-        {admins.length === 0 ? (
+        {(admins?.length ?? 0) === 0 ? (
           <div className="px-6 py-12 text-center">
             <Shield className="h-10 w-10 text-gray-300 mx-auto mb-3" />
             <p className="text-gray-500 text-sm">No admin accounts yet</p>
