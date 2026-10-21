@@ -9,9 +9,9 @@ import (
 	"strings"
 	"time"
 
+	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
 	"github.com/jmoiron/sqlx"
 	qrcode "github.com/skip2/go-qrcode"
-	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -55,9 +55,11 @@ func GetRealPhoneNumber(client *whatsmeow.Client, jid types.JID) string {
 // BookingDetailsResult holds the result of the booking lookup query for controller payment validation
 type BookingDetailsResult struct {
 	ID                 string    `db:"id"`
+	BookingID          string    `db:"booking_id"`
 	BookingReference   string    `db:"booking_reference"`
 	TotalAmount        float64   `db:"total_amount"`
 	Status             string    `db:"status"`
+	PaymentStatus      string    `db:"payment_status"`
 	CreatedAt          time.Time `db:"created_at"`
 	UpdatedAt          time.Time `db:"updated_at"`
 	JourneyID          string    `db:"journey_id"`
@@ -76,11 +78,16 @@ type BookingDetailsResult struct {
 	FirstPassengerName string    `db:"first_passenger_name"`
 	PassengerPhones    string    `db:"passenger_phones"`
 	SeatNumbers        string    `db:"seat_numbers"`
+	PassengerName      string    `db:"passenger_name"`
+	PassengerPhone     string    `db:"passenger_phone"`
+	TicketID           string    `db:"ticket_id"`
+	SeatNumber         string    `db:"seat_number"`
+	Price              float64   `db:"price"`
 }
 
 type controllerPINResult struct {
-	UserID    string `db:"user_id"`
-	AgentName string `db:"agent_name"`
+	UserID     string `db:"user_id"`
+	AgentName  string `db:"agent_name"`
 	AgencyName string `db:"agency_name"`
 }
 
@@ -94,6 +101,25 @@ func verifyControllerPIN(phone string, pin string) *controllerPINResult {
 		FROM users u
 		LEFT JOIN organizations o ON u.organization_id = o.id
 		WHERE u.pin = $1 AND u.is_active = true
+	`, pin)
+	if err != nil {
+		return nil
+	}
+	return &res
+}
+
+// verifyControllerPINByPin verifies a controller PIN without phone number check
+func verifyControllerPINByPin(pin string) *controllerPINResult {
+	var res controllerPINResult
+	err := DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent', 'admin', 'platform_admin')
 	`, pin)
 	if err != nil {
 		return nil
@@ -274,6 +300,22 @@ func getPromptForStep(s *Session) string {
 		return "" // Dynamic prompt handled in process()
 	case StepControllerCheckInProcess:
 		return "" // Dynamic prompt handled in process()
+	case StepControllerEnterPin:
+		return "👮 *Guichet Contrôleur - Authentification*\n\nVeuillez saisir votre code PIN agent :"
+	case StepControllerSelectAction:
+		return "" // Dynamic prompt handled in process()
+	case StepControllerValidatePayment:
+		return "💳 *Validation de Paiement*\n\nVeuillez fournir l'une des informations suivantes :\n1️⃣ **Référence de réservation** (ex: BBb428a003)\n2️⃣ **Numéro de téléphone du passager** (ex: 243974645174)\n3️⃣ **Nom complet du passager** (ex: Lazing Kasuku)\n4️⃣ Ou **Envoyez directement l'image du QR Code** du billet.\n\nTapez *menu* pour annuler."
+	case StepControllerDoCheckin:
+		return "🎫 *Check-in*\n\nVeuillez saisir la référence du billet ou le token :"
+	case StepControllerSearchByRef:
+		return "✍️ Veuillez entrer la référence de réservation (ex: BBb428a003) :"
+	case StepControllerSearchByPhone:
+		return "📱 Veuillez entrer le numéro de téléphone du passager (ex: 243974645174) :"
+	case StepControllerSearchByName:
+		return "👤 Veuillez entrer le nom complet du passager (ex: Lazing Kasuku) :"
+	case StepControllerSearchByQR:
+		return "📸 Veuillez envoyer l'image du QR Code du billet :"
 	default:
 		return "❓ Étape inconnue. Tapez *menu* pour revenir au menu principal."
 	}
@@ -914,8 +956,8 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		s.OrderNumber = reference
 		saveSession(phone, s)
 		s.Step = StepPaymentCompleted
-			// Use redirectURL to avoid "declared but not used" error
-			_ = redirectURL
+		// Use redirectURL to avoid "declared but not used" error
+		_ = redirectURL
 		return getPromptForStep(s)
 
 	case StepPaymentCompleted:
@@ -1006,7 +1048,7 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		// Calculate the choice number for "Suivant" button (if applicable)
 		var nextPageChoice int
 		var hasNextPage bool
-		if startIndex + displayedAgencies < len(s.Agencies) {
+		if startIndex+displayedAgencies < len(s.Agencies) {
 			nextPageChoice = displayedAgencies + 1
 			hasNextPage = true
 		}
@@ -1220,9 +1262,9 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			s.Step = StepSelectTicketDetails
 			return b.String()
 		case "2":
-			// Controller menu
+			// Controller menu - redirect to PIN entry
 			s.PreviousStep = s.Step
-			s.Step = StepControllerInput
+			s.Step = StepControllerEnterPin
 			return getPromptForStep(s)
 		case "3":
 			// Return to main menu
@@ -1338,6 +1380,235 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 
 		return menu.String()
 
+	case StepControllerEnterPin:
+		// Handle controller PIN entry
+		if strings.TrimSpace(text) == "" {
+			return "👮 *Guichet Contrôleur - Authentification*\n\nVeuillez saisir votre code PIN agent :"
+		}
+
+		pin := strings.TrimSpace(text)
+
+		// Verify the PIN in database (no phone check, just PIN)
+		result := verifyControllerPINByPin(pin)
+		if result == nil {
+			log.Printf("Authentification agent échouée pour le PIN %s", pin)
+			return "❌ Code PIN incorrect. Veuillez réessayer ou tapez *menu* pour annuler."
+		}
+
+		// PIN is valid, set controller authentication fields
+		s.IsControllerAuthenticated = true
+		s.AgentName = result.AgentName
+		s.AssignedAgencies = []Agency{{Name: result.AgencyName}}
+
+		// Move to controller action selection
+		s.PreviousStep = s.Step
+		s.Step = StepControllerSelectAction
+
+		// Build controller menu message with exact format
+		var menu strings.Builder
+		menu.WriteString("✅ *Authentification réussie !*\n")
+		menu.WriteString(fmt.Sprintf("Bienvenue, %s (\n", s.AgentName))
+		menu.WriteString("👮 *Guichet Contrôleur*\n\n")
+		menu.WriteString("🏢 *Agences affectées :*\n")
+		for i, agency := range s.AssignedAgencies {
+			menu.WriteString(fmt.Sprintf("%d. %s\n", i+1, agency.Name))
+		}
+		menu.WriteString("\nSélectionnez une action :\n")
+		menu.WriteString("1️⃣ Valider le paiement\n")
+		menu.WriteString("2️⃣ Faire le check-in\n")
+
+		return menu.String()
+
+	case StepControllerSelectAction:
+		// Handle controller action selection
+		choice := strings.TrimSpace(text)
+		switch choice {
+		case "1", "1️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerValidatePayment
+			return getPromptForStep(s)
+		case "2", "2️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerDoCheckin
+			return getPromptForStep(s)
+		default:
+			return "Choix invalide. Veuillez sélectionner 1 pour Valider le paiement ou 2 pour Faire le check-in, ou tapez *menu* pour retourner au menu principal."
+		}
+
+	case StepControllerValidatePayment:
+		// Handle sub-menu selection (1/2/3/4) or direct input
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+
+		// If user types 1/2/3/4, switch to the corresponding search sub-step
+		switch input {
+		case "1", "1️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerSearchByRef
+			return getPromptForStep(s)
+		case "2", "2️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerSearchByPhone
+			return getPromptForStep(s)
+		case "3", "3️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerSearchByName
+			return getPromptForStep(s)
+		case "4", "4️⃣":
+			s.PreviousStep = s.Step
+			s.Step = StepControllerSearchByQR
+			return getPromptForStep(s)
+		}
+
+		// Otherwise, treat as direct input and search using the unified query
+		return searchBookingForPaymentValidation(s, input)
+
+	case StepControllerSearchByRef:
+		// Search by booking reference
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+		return searchBookingForPaymentValidation(s, input)
+
+	case StepControllerSearchByPhone:
+		// Search by passenger phone
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+		return searchBookingForPaymentValidation(s, input)
+
+	case StepControllerSearchByName:
+		// Search by passenger name
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+		return searchBookingForPaymentValidation(s, input)
+
+	case StepControllerSearchByQR:
+		// Search by QR token (text input as fallback)
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+		return searchBookingForPaymentValidation(s, input)
+
+	case StepControllerDoCheckin:
+		// Handle direct check-in: user enters booking reference, ticket reference, or token
+		input := strings.TrimSpace(text)
+		if input == "" {
+			return getPromptForStep(s)
+		}
+
+		// Search for booking/ticket using the input
+		var bookingResult BookingDetailsResult
+		err := DB.Get(&bookingResult, `
+		SELECT
+			b.id AS booking_id,
+			b.id AS id,
+			b.booking_reference,
+			b.status,
+			b.status AS payment_status,
+			t.id AS ticket_id,
+			t.passenger_name,
+			t.passenger_phone,
+			t.seat_number,
+			t.price,
+			o.name AS organization_name,
+			r.origin,
+			r.destination,
+			j.departure_date::text AS departure_date,
+			j.departure_time::text AS departure_time
+		FROM tickets t
+		JOIN bookings b ON t.booking_id = b.id
+		JOIN journeys j ON t.journey_id = j.id
+		JOIN routes r ON j.route_id = r.id
+		JOIN organizations o ON j.organization_id = o.id
+		WHERE b.booking_reference = $1
+		   OR t.id = $1
+		   OR t.qr_token = $1
+		LIMIT 1
+	`, input)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return "❌ Aucune réservation ou billet trouvé avec cette référence.\n\nVeuillez vérifier et réessayer, ou tapez *menu* pour annuler."
+			}
+			return fmt.Sprintf("❌ Erreur lors de la recherche : %v\n\nTapez *menu* pour annuler.", err)
+		}
+
+		// Check if ticket is already checked in
+		if bookingResult.PaymentStatus == "checked_in" {
+			return fmt.Sprintf("ℹ️ Ce billet (Réservation %s) est déjà enregistré (check-in effectué).\n\nTapez *menu* pour retourner au menu principal.", bookingResult.BookingReference)
+		}
+
+		// Check if booking is confirmed/paid
+		if bookingResult.PaymentStatus != "confirmed" && bookingResult.PaymentStatus != "paid" {
+			return fmt.Sprintf("⚠️ Cette réservation (%s) n'est pas encore payée/confirmée.\n\nVeuillez d'abord valider le paiement (option 1) avant de faire le check-in.\n\nTapez *menu* pour retourner au menu principal.", bookingResult.BookingReference)
+		}
+
+		// Store booking ID in session data for check-in
+		if s.Data == nil {
+			s.Data = make(map[string]interface{})
+		}
+		s.Data["controller_booking_id"] = bookingResult.BookingID
+		s.Data["controller_booking_ref"] = bookingResult.BookingReference
+		s.Data["controller_ticket_id"] = bookingResult.TicketID
+
+		var passengerName string
+		if bookingResult.PassengerNames != "" {
+			names := strings.Split(bookingResult.PassengerNames, ",")
+			if len(names) > 0 && names[0] != "" {
+				passengerName = names[0]
+			} else {
+				passengerName = "Passager"
+			}
+		} else if bookingResult.FirstPassengerName != "" {
+			passengerName = bookingResult.FirstPassengerName
+		} else if bookingResult.PassengerName != "" {
+			passengerName = bookingResult.PassengerName
+		} else {
+			passengerName = "Passager"
+		}
+
+		var seatNumber string
+		if bookingResult.SeatNumber != "" {
+			seatNumber = bookingResult.SeatNumber
+		} else if bookingResult.SeatNumbers != "" {
+			// Get first seat from comma-separated list
+			seats := strings.Split(bookingResult.SeatNumbers, ",")
+			if len(seats) > 0 && seats[0] != "" {
+				seatNumber = seats[0]
+			}
+		}
+
+		// Store additional data for check-in confirmation message
+		s.Data["controller_passenger_name"] = passengerName
+		s.Data["controller_seat_number"] = seatNumber
+		s.Data["controller_origin"] = bookingResult.Origin
+		s.Data["controller_destination"] = bookingResult.Destination
+
+		// Show check-in confirmation with improved format
+		s.PreviousStep = s.Step
+		s.Step = StepControllerCheckInConfirm
+
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("ℹ️ Cette réservation (*%s*) est déjà confirmée/payée.\n\n", bookingResult.BookingReference))
+		b.WriteString(fmt.Sprintf("👤 *Passager* : %s\n", passengerName))
+		b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", bookingResult.Origin, bookingResult.Destination))
+		b.WriteString(fmt.Sprintf("📅 *Départ* : %s à %s\n", formatDate(bookingResult.DepartureDate), bookingResult.DepartureTime))
+		if seatNumber != "" {
+			b.WriteString(fmt.Sprintf("💺 *Siège* : N° %s\n", seatNumber))
+		}
+		b.WriteString("\nVoulez-vous faire le check-in ?\n\n")
+		b.WriteString("1️⃣ Oui (Check-in)\n")
+		b.WriteString("2️⃣ Non (Retour)\n")
+		return b.String()
+
 	case StepControllerActions:
 		// Handle controller menu selection
 		switch strings.TrimSpace(text) {
@@ -1392,11 +1663,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 				   r.id as route_id, r.origin, r.destination, r.base_price,
 				   o.id as organization_id, o.name as organization_name,
-					   GROUP_CONCAT(t.id) = ticket_ids,
-					   GROUP_CONCAT(t.passenger_name) = passenger_names,
-					   MIN(t.passenger_name) = first_passenger_name,
-					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-					   GROUP_CONCAT(t.seat_number) = seat_numbers
+					   GROUP_CONCAT(t.id) AS ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+					   MIN(t.passenger_name) AS first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+					   GROUP_CONCAT(t.seat_number) AS seat_numbers
 			FROM bookings b
 			JOIN journeys j ON b.journey_id = j.id
 			JOIN routes r ON j.route_id = r.id
@@ -1433,11 +1704,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 				   r.id as route_id, r.origin, r.destination, r.base_price,
 				   o.id as organization_id, o.name as organization_name,
-					   GROUP_CONCAT(t.id) = ticket_ids,
-					   GROUP_CONCAT(t.passenger_name) = passenger_names,
-					   MIN(t.passenger_name) = first_passenger_name,
-					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-					   GROUP_CONCAT(t.seat_number) = seat_numbers
+					   GROUP_CONCAT(t.id) AS ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+					   MIN(t.passenger_name) AS first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+					   GROUP_CONCAT(t.seat_number) AS seat_numbers
 			FROM bookings b
 			JOIN journeys j ON b.journey_id = j.id
 			JOIN routes r ON j.route_id = r.id
@@ -1473,11 +1744,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 				   r.id as route_id, r.origin, r.destination, r.base_price,
 				   o.id as organization_id, o.name as organization_name,
-					   GROUP_CONCAT(t.id) = ticket_ids,
-					   GROUP_CONCAT(t.passenger_name) = passenger_names,
-					   MIN(t.passenger_name) = first_passenger_name,
-					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-					   GROUP_CONCAT(t.seat_number) = seat_numbers
+					   GROUP_CONCAT(t.id) AS ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+					   MIN(t.passenger_name) AS first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+					   GROUP_CONCAT(t.seat_number) AS seat_numbers
 			FROM bookings b
 			JOIN journeys j ON b.journey_id = j.id
 			JOIN routes r ON j.route_id = r.id
@@ -1494,11 +1765,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 					   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 					   r.id as route_id, r.origin, r.destination, r.base_price,
 					   o.id as organization_id, o.name as organization_name,
-						   GROUP_CONCAT(t.id) = ticket_ids,
-						   GROUP_CONCAT(t.passenger_name) = passenger_names,
-						   MIN(t.passenger_name) = first_passenger_name,
-						   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-						   GROUP_CONCAT(t.seat_number) = seat_numbers
+						   GROUP_CONCAT(t.id) AS ticket_ids,
+						   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+						   MIN(t.passenger_name) AS first_passenger_name,
+						   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+						   GROUP_CONCAT(t.seat_number) AS seat_numbers
 				FROM bookings b
 				JOIN journeys j ON b.journey_id = j.id
 				JOIN routes r ON j.route_id = r.id
@@ -1534,11 +1805,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 				   r.id as route_id, r.origin, r.destination, r.base_price,
 				   o.id as organization_id, o.name as organization_name,
-					   GROUP_CONCAT(t.id) = ticket_ids,
-					   GROUP_CONCAT(t.passenger_name) = passenger_names,
-					   MIN(t.passenger_name) = first_passenger_name,
-					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-					   GROUP_CONCAT(t.seat_number) = seat_numbers
+					   GROUP_CONCAT(t.id) AS ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+					   MIN(t.passenger_name) AS first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+					   GROUP_CONCAT(t.seat_number) AS seat_numbers
 			FROM bookings b
 			JOIN journeys j ON b.journey_id = j.id
 			JOIN routes r ON j.route_id = r.id
@@ -1560,11 +1831,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 					   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
 					   r.id as route_id, r.origin, r.destination, r.base_price,
 					   o.id as organization_id, o.name as organization_name,
-						   GROUP_CONCAT(t.id) = ticket_ids,
-						   GROUP_CONCAT(t.passenger_name) = passenger_names,
-						   MIN(t.passenger_name) = first_passenger_name,
-						   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
-						   GROUP_CONCAT(t.seat_number) = seat_numbers
+						   GROUP_CONCAT(t.id) AS ticket_ids,
+						   GROUP_CONCAT(t.passenger_name) AS passenger_names,
+						   MIN(t.passenger_name) AS first_passenger_name,
+						   GROUP_CONCAT(t.passenger_phone) AS passenger_phones,
+						   GROUP_CONCAT(t.seat_number) AS seat_numbers
 			FROM bookings b
 			JOIN journeys j ON b.journey_id = j.id
 			JOIN routes r ON j.route_id = r.id
@@ -1615,50 +1886,128 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 	case StepControllerCheckInConfirm:
 		// Handle check-in confirmation
 		if strings.TrimSpace(text) == "1" || strings.TrimSpace(text) == "1️⃣" {
-			s.Step = StepControllerCheckInProcess
-			return getPromptForStep(s)
+			// Process check-in immediately when user confirms
+			bookingID := ""
+			ticketID := ""
+			bookingRef := ""
+			passengerName := ""
+			seatNumber := ""
+			origin := ""
+			destination := ""
+
+			if s.Data != nil {
+				if id, ok := s.Data["controller_booking_id"].(string); ok {
+					bookingID = id
+				}
+				if tid, ok := s.Data["controller_ticket_id"].(string); ok {
+					ticketID = tid
+				}
+				if ref, ok := s.Data["controller_booking_ref"].(string); ok {
+					bookingRef = ref
+				}
+				if name, ok := s.Data["controller_passenger_name"].(string); ok {
+					passengerName = name
+				}
+				if seat, ok := s.Data["controller_seat_number"].(string); ok {
+					seatNumber = seat
+				}
+				if org, ok := s.Data["controller_origin"].(string); ok {
+					origin = org
+				}
+				if dest, ok := s.Data["controller_destination"].(string); ok {
+					destination = dest
+				}
+			}
+
+			if bookingID == "" && ticketID == "" {
+				return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
+			}
+
+			// Update ticket status to checked_in
+			var err error
+			if ticketID != "" {
+				_, err = DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1 OR qr_token = $2`, bookingID, ticketID)
+			} else {
+				_, err = DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1`, bookingID)
+			}
+			if err != nil {
+				return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+			}
+
+			// Build and send success message explicitly
+			successMsg := fmt.Sprintf("✅ *Check-in effectué avec succès !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n💺 *Siège* : N° %s\n🚌 *Trajet* : %s ➔ %s\n📊 *Statut* : checked_in (Embarqué)\n\nTapez *menu* pour revenir au menu principal.",
+				bookingRef, passengerName, seatNumber, origin, destination)
+
+			// Reset to menu
+			s.Step = StepMenu
+			s.PreviousStep = ""
+
+			return successMsg
 		} else if strings.TrimSpace(text) == "2" || strings.TrimSpace(text) == "2️⃣" || strings.ToLower(strings.TrimSpace(text)) == "0" || strings.ToLower(strings.TrimSpace(text)) == "retour" {
 			s.PreviousStep = s.Step
-			s.Step = StepControllerActions
-			return getPromptForStep(s)
+			s.Step = StepControllerSelectAction
+			// Return controller menu with "Opération annulée" message
+			var menu strings.Builder
+			menu.WriteString("↩️ *Opération annulée.*\n\n")
+			menu.WriteString("Sélectionnez une action :\n")
+			menu.WriteString("1️⃣ Valider le paiement\n")
+			menu.WriteString("2️⃣ Faire le check-in\n")
+			return menu.String()
 		}
 		return getPromptForStep(s)
 
 	case StepControllerCheckInProcess:
-		// Process check-in
-		bookingID := ""
-		if s.Data != nil {
-			if id, ok := s.Data["controller_booking_id"].(string); ok {
-				bookingID = id
-			}
-		}
-
-		if bookingID == "" {
-			return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
-		}
-
-		// Update all tickets for this booking to checked_in status
-		_, err := DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1 AND status IN ('active', 'confirmed')`, bookingID)
-		if err != nil {
-			return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
-		}
-
-		bookingRef := ""
-		if s.Data != nil {
-			if ref, ok := s.Data["controller_booking_ref"].(string); ok {
-				bookingRef = ref
-			}
-		}
-
-		s.PreviousStep = s.Step
-		s.Step = StepControllerActions
-
-		return fmt.Sprintf("✅ Check-in effectué pour la réservation %s !\n\nSélectionnez une action :\n1️⃣ Valider le paiement\n2️⃣ Faire le check-in", bookingRef)
+		// This step should no longer be reached directly, but keep as fallback
+		return "✅ Check-in déjà traité. Tapez *menu* pour revenir au menu principal."
 
 	default:
 		return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
 	}
 	return ""
+}
+
+// searchBookingForPaymentValidation searches for a booking using the unified query
+// and processes it for payment validation
+func searchBookingForPaymentValidation(s *Session, input string) string {
+	var bookingResult BookingDetailsResult
+	err := DB.Get(&bookingResult, `
+		SELECT
+			b.id AS booking_id,
+			b.id AS id,
+			b.booking_reference,
+			b.status,
+			b.status AS payment_status,
+			t.id AS ticket_id,
+			t.passenger_name,
+			t.passenger_phone,
+			t.seat_number,
+			t.price,
+			o.name AS organization_name,
+			r.origin,
+			r.destination,
+			j.departure_date::text AS departure_date,
+			j.departure_time::text AS departure_time
+		FROM tickets t
+		JOIN bookings b ON t.booking_id = b.id
+		JOIN journeys j ON t.journey_id = j.id
+		JOIN routes r ON j.route_id = r.id
+		JOIN organizations o ON j.organization_id = o.id
+		WHERE b.booking_reference = $1
+		   OR t.passenger_phone ILIKE '%' || $1 || '%'
+		   OR t.passenger_name ILIKE '%' || $1 || '%'
+		   OR t.qr_token = $1
+		LIMIT 1
+	`, input)
+
+	if err != nil {
+		if err == sql.ErrNoRows {
+			return "❌ Aucune réservation trouvée avec ces informations.\n\nVeuillez vérifier et réessayer, ou tapez *menu* pour annuler."
+		}
+		return fmt.Sprintf("❌ Erreur lors de la recherche : %v\n\nTapez *menu* pour annuler.", err)
+	}
+
+	// Process the found booking for payment validation
+	return processControllerBookingResult(s, bookingResult)
 }
 
 // processControllerBookingResult processes a booking found by the controller
@@ -1675,6 +2024,7 @@ func processControllerBookingResult(s *Session, bookingResult BookingDetailsResu
 		}
 		s.Data["controller_booking_id"] = bookingResult.ID
 		s.Data["controller_booking_ref"] = bookingResult.BookingReference
+		s.Data["controller_ticket_id"] = bookingResult.TicketID
 
 		var passengerName string
 		if bookingResult.PassengerNames != "" {
@@ -1684,16 +2034,40 @@ func processControllerBookingResult(s *Session, bookingResult BookingDetailsResu
 			} else {
 				passengerName = "Passager"
 			}
+		} else if bookingResult.FirstPassengerName != "" {
+			passengerName = bookingResult.FirstPassengerName
+		} else if bookingResult.PassengerName != "" {
+			passengerName = bookingResult.PassengerName
 		} else {
 			passengerName = "Passager"
 		}
 
-		// Build check-in confirmation prompt
+		var seatNumber string
+		if bookingResult.SeatNumber != "" {
+			seatNumber = bookingResult.SeatNumber
+		} else if bookingResult.SeatNumbers != "" {
+			// Get first seat from comma-separated list
+			seats := strings.Split(bookingResult.SeatNumbers, ",")
+			if len(seats) > 0 && seats[0] != "" {
+				seatNumber = seats[0]
+			}
+		}
+
+		// Store additional data for check-in confirmation message
+		s.Data["controller_passenger_name"] = passengerName
+		s.Data["controller_seat_number"] = seatNumber
+		s.Data["controller_origin"] = bookingResult.Origin
+		s.Data["controller_destination"] = bookingResult.Destination
+
+		// Build check-in confirmation prompt with improved format
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("ℹ️ Cette réservation (%s) est déjà confirmée/payée.\n\n", bookingResult.BookingReference))
-		b.WriteString(fmt.Sprintf("Passager : %s\n", passengerName))
-		b.WriteString(fmt.Sprintf("Trajet : %s → %s\n", bookingResult.Origin, bookingResult.Destination))
-		b.WriteString(fmt.Sprintf("Date : %s à %s\n", formatDate(bookingResult.DepartureDate), bookingResult.DepartureTime))
+		b.WriteString(fmt.Sprintf("ℹ️ Cette réservation (*%s*) est déjà confirmée/payée.\n\n", bookingResult.BookingReference))
+		b.WriteString(fmt.Sprintf("👤 *Passager* : %s\n", passengerName))
+		b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", bookingResult.Origin, bookingResult.Destination))
+		b.WriteString(fmt.Sprintf("📅 *Départ* : %s à %s\n", formatDate(bookingResult.DepartureDate), bookingResult.DepartureTime))
+		if seatNumber != "" {
+			b.WriteString(fmt.Sprintf("💺 *Siège* : N° %s\n", seatNumber))
+		}
 		b.WriteString("\nVoulez-vous faire le check-in ?\n\n")
 		b.WriteString("1️⃣ Oui (Check-in)\n")
 		b.WriteString("2️⃣ Non (Retour)\n")
@@ -1899,6 +2273,16 @@ func valueOr(v, fallback string) string {
 		return fallback
 	}
 	return v
+}
+
+// isNumeric checks if a string contains only digits
+func isNumeric(s string) bool {
+	for _, r := range s {
+		if r < '0' || r > '9' {
+			return false
+		}
+	}
+	return len(s) > 0
 }
 
 func parseDate(input string) string {
