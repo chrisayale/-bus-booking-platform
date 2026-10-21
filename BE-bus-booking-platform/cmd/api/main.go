@@ -6,11 +6,11 @@ import (
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/config"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/database"
-	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/handlers"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/middleware"
-	"github.com/bus-booking/BE-bus-booking-platform/internal/services"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/payments"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/services"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/gin-gonic/gin"
 	"github.com/joho/godotenv"
 	"github.com/rs/cors"
@@ -29,11 +29,11 @@ func main() {
 	}
 	defer db.Close()
 
-	// Run migrations
-		// Connect to WhatsApp
-		whatsapp.DB = db
+	// Connect to WhatsApp
+	whatsapp.DB = db
 	whatsapp.QRSecret = cfg.JWTSecret
 	whatsapp.AppURL = cfg.AppURL
+	log.Printf("[MAIN] AppURL set to: %s", whatsapp.AppURL) // Debug logging
 	whatsapp.FlexPay = payments.NewFlexPayProvider()
 	whatsapp.StartPaymentTimeoutWorker()
 	go func() {
@@ -43,11 +43,6 @@ func main() {
 	}()
 	if err := database.RunMigrations(db); err != nil {
 		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
-	}
-
-	// Auto-seed with demo data on first run
-	if err := database.RunSeed(db); err != nil {
-		log.Printf("Warning: seed error: %v", err)
 	}
 
 	// Initialize services
@@ -72,7 +67,7 @@ func main() {
 	}
 
 	// Initialize handlers
-		b2bHandler := handlers.NewB2BHandler(db, storageSvc, cfg.JWTSecret, cfg.JWTExpiry, cfg.RefreshExpiry)
+	b2bHandler := handlers.NewB2BHandler(db, storageSvc, cfg.JWTSecret, cfg.JWTExpiry, cfg.RefreshExpiry)
 	b2cHandler := handlers.NewB2CHandler(db, cfg.JWTSecret, cfg.JWTSecret, cfg.JWTExpiry, cfg.RefreshExpiry, emailSvc)
 	guestHandler := handlers.NewGuestHandler(db, cfg.JWTSecret, emailSvc, cfg.AppURL)
 	analyticsHandler := handlers.NewAnalyticsHandler(db)
@@ -82,18 +77,18 @@ func main() {
 	// Rate limiter for auth endpoints (login, register, forgot-password, etc.)
 	authRateLimiter := middleware.NewRateLimiter(cfg.RateLimitRequests, cfg.RateLimitWindow)
 
-	r := gin.Default()
+	r := gin.New()
+	r.Use(gin.Logger())
+	r.Use(gin.Recovery())
 
 	// CORS
-	// CORS — wildcard origin is safe because auth uses Bearer tokens, not cookies.
-	// AllowCredentials is omitted to comply with the CORS spec (cannot combine * with credentials).
-	corsHandler := cors.New(cors.Options{
+	corsMiddleware := cors.New(cors.Options{
 		AllowedOrigins:   []string{"*"},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Origin", "Content-Type", "Authorization"},
 	})
 	r.Use(func(c *gin.Context) {
-		corsHandler.HandlerFunc(c.Writer, c.Request)
+		corsMiddleware.HandlerFunc(c.Writer, c.Request)
 		if c.Request.Method == "OPTIONS" {
 			c.AbortWithStatus(204)
 			return
@@ -101,150 +96,209 @@ func main() {
 		c.Next()
 	})
 
-	// Serve bus images from database (only used with PgStorage)
-	r.GET("/api/images/:filename", func(c *gin.Context) {
-		if _, ok := storageSvc.(*services.PgStorage); !ok {
-			c.Status(http.StatusNotFound)
-			return
-		}
-		fileName := c.Param("filename")
-		var imageData []byte
-		var contentType string
-		err := db.QueryRow(`SELECT image_data, content_type FROM bus_images WHERE file_name = $1`, fileName).Scan(&imageData, &contentType)
-		if err != nil {
-			c.Status(http.StatusNotFound)
-			return
-		}
-		c.Data(http.StatusOK, contentType, imageData)
-	})
-
 	// Health check
 	r.GET("/api/health", func(c *gin.Context) {
-		c.JSON(200, gin.H{"status": "ok"})
+		c.JSON(http.StatusOK, gin.H{"status": "OK"})
 	})
 
-	r.GET("/api/whatsapp/qr", func(c *gin.Context) {
-		png := whatsapp.GetCurrentQR()
-		if png == nil {
-			c.String(http.StatusNotFound, "Pas de QR code disponible pour le moment (déjà connecté ou pas encore généré)")
-			return
-		}
-		c.Data(http.StatusOK, "image/png", png)
-	})
-	// Public routes (no auth required)
+	// Payment webhooks
 	api := r.Group("/api")
 	{
-		// Auth — rate-limited POST endpoints to prevent brute-force and spam
-		authLimited := api.Group("/auth")
-		authLimited.Use(authRateLimiter.Middleware())
+		api.POST("/payments/flexpay/callback", paymentHandler.FlexPayCallback)
+		api.POST("/payments/flexpay/approve", paymentHandler.FlexPayApprove)
+		api.POST("/payments/flexpay/cancel", paymentHandler.FlexPayCancel)
+		api.POST("/payments/flexpay/decline", paymentHandler.FlexPayDecline)
+
+		// Auth routes (rate-limited)
+		auth := api.Group("/auth")
+		auth.Use(authRateLimiter.Middleware())
 		{
-			authLimited.POST("/register", b2cHandler.Register)
-			authLimited.POST("/login", b2cHandler.Login)
-			authLimited.POST("/refresh", b2cHandler.RefreshToken)
-			authLimited.POST("/forgot-password", b2cHandler.ForgotPassword)
-			authLimited.POST("/reset-password", b2cHandler.ResetPassword)
+			auth.POST("/register", b2cHandler.Register)
+			auth.POST("/login", b2cHandler.Login)
+			auth.POST("/refresh", b2cHandler.RefreshToken)
+			auth.POST("/forgot-password", b2cHandler.ForgotPassword)
+			auth.POST("/reset-password", b2cHandler.ResetPassword)
 		}
-		// Auth GET (verify-email) — no rate limit needed
+		// Auth GET (verify-email) - no rate limit needed
 		api.GET("/auth/verify-email", b2cHandler.VerifyEmail)
 
-		// Search (no auth required)
-		api.GET("/trips/search", b2cHandler.SearchTrips)
-		api.GET("/journeys/:id/seats", b2cHandler.GetJourneySeats)
+		// Auth profile endpoint (alias for /api/user/profile)
+		auth.GET("/profile", b2cHandler.GetProfile)
 
-		// Guest booking & ticket download (no auth required)
+		// User profile routes (require auth)
+		user := api.Group("/user")
+		user.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		{
+			user.GET("/profile", b2cHandler.GetProfile)
+			user.PUT("/profile", b2cHandler.UpdateProfile)
+			user.PUT("/password", b2cHandler.ChangePassword)
+			user.DELETE("/account", b2cHandler.DeleteAccount)
+		}
+
+		// Email verification routes
+		email := api.Group("/email")
+		{
+			email.POST("/verification", b2cHandler.SendVerificationEmail)
+			email.GET("/verification", b2cHandler.VerifyEmail)
+		}
+
+		// Search routes
+		api.GET("/search/trips", b2cHandler.SearchTrips)
+
+		// Booking routes
+		booking := api.Group("/booking")
+		booking.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		{
+			booking.GET("/journeys/:id/seats", b2cHandler.GetJourneySeats)
+			booking.POST("", b2cHandler.BookTickets)
+		}
+
+		// Ticket management routes
+		ticket := api.Group("/ticket")
+		ticket.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		{
+			ticket.PUT("/:id", b2cHandler.UpdateTicket)
+			ticket.DELETE("/:id", b2cHandler.CancelTicket)
+			ticket.GET("/download/:token", b2cHandler.DownloadTicket)
+		}
+
+		// Booking management routes
+		bookingMgmt := api.Group("/bookings")
+		bookingMgmt.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		{
+			bookingMgmt.GET("", b2cHandler.GetUserBookings)
+			bookingMgmt.DELETE("/:id", b2cHandler.DeleteBooking)
+			bookingMgmt.POST("/:id/cancel", b2cHandler.CancelBooking)
+		}
+
+		// Guest checkout (no auth required)
 		api.POST("/guest/checkout", guestHandler.GuestCheckout)
-		api.POST("/payments/flexpay/callback", paymentHandler.FlexPayCallback)
-		api.GET("/tickets/download/:token", b2cHandler.DownloadTicket)
+
+		// Admin routes
+		admin := api.Group("/admin")
+		admin.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		admin.Use(middleware.AdminMiddleware())
+		{
+			// Dashboard and analytics
+			admin.GET("/dashboard", analyticsHandler.GetDashboardStats)
+			admin.GET("/analytics", analyticsHandler.GetRevenueReport)
+
+			// Exchange rate management
+			admin.GET("/exchange-rate", adminHandler.GetExchangeRate)
+			admin.PUT("/exchange-rate", adminHandler.UpdateExchangeRate)
+
+			// Agency management
+			admin.GET("/agencies", b2bHandler.ListAgencies)
+
+			// User management (Super Admin only)
+			users := admin.Group("/users")
+			users.Use(middleware.RoleMiddleware("platform_admin"))
+			{
+				users.GET("", adminHandler.GetUsers)
+				users.POST("", adminHandler.CreateUser)
+				users.GET("/:id", adminHandler.GetUserById)
+				users.PUT("/:id", adminHandler.UpdateUser)
+				users.DELETE("/:id", adminHandler.DeleteUser)
+			}
+
+			// Placeholder for admin broadcast functionality
+			admin.POST("/broadcast", func(c *gin.Context) {
+				c.JSON(http.StatusOK, gin.H{"status": "broadcast endpoint not implemented"})
+			})
+		}
+
+		// Analytics routes (require organization auth - owner or platform_admin)
+		analytics := api.Group("/analytics")
+		analytics.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		analytics.Use(middleware.RoleMiddleware("owner"))
+		{
+			analytics.GET("/dashboard", analyticsHandler.GetDashboardStats)
+			analytics.GET("/report", analyticsHandler.GetRevenueReport)
+		}
+
+		// B2B-aligned routes (require organization auth) - moved to root /api/ level to match frontend expectations
+		b2b := api.Group("")
+		b2b.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		b2b.Use(middleware.RoleMiddleware("owner"))
+		{
+			// Bus management
+			buses := b2b.Group("/buses")
+			{
+				buses.POST("", b2bHandler.CreateBus)
+				buses.GET("", b2bHandler.ListBuses)
+				buses.GET("/:id", b2bHandler.GetBus)
+				buses.PUT("/:id", b2bHandler.UpdateBus)
+				buses.DELETE("/:id", b2bHandler.DeleteBus)
+				buses.POST("/:id/image", b2bHandler.UploadBusImage)
+			}
+
+			// Route management
+			routes := b2b.Group("/routes")
+			{
+				routes.POST("", b2bHandler.CreateRoute)
+				routes.GET("", b2bHandler.ListRoutes)
+				routes.GET("/:id", b2bHandler.GetRoute)
+				routes.DELETE("/:id", b2bHandler.DeleteRoute)
+			}
+
+			// Journey management
+			journeys := b2b.Group("/journeys")
+			{
+				journeys.POST("", b2bHandler.CreateJourney)
+				journeys.GET("", b2bHandler.ListJourneys)
+				journeys.PUT("/:id/status", b2bHandler.UpdateJourneyStatus)
+			}
+
+			// Ticket management (moved from /organization/tickets to match frontend expectation)
+			b2b.GET("/tickets", b2bHandler.ListOrganizationTickets)
+			b2b.POST("/impersonate-owner/:orgId", b2bHandler.ImpersonateOwner)
+
+			// QR ticket scanning
+			b2b.POST("/scan-ticket", b2bHandler.ScanTicket)
+		}
+
+		// Platform admin functions (platform_admin role required)
+		platformAdmin := api.Group("/platform-admin")
+		platformAdmin.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		platformAdmin.Use(middleware.RoleMiddleware("platform_admin"))
+		{
+			platformAdmin.GET("/pending-owners", b2bHandler.ListPendingOwners)
+			platformAdmin.PUT("/pending-owners/:id/approve", b2bHandler.ApproveOwner)
+			platformAdmin.PUT("/pending-owners/:id/reject", b2bHandler.RejectOwner)
+			platformAdmin.GET("/agencies", b2bHandler.ListAgencies)
+			platformAdmin.GET("/pending-agencies", b2bHandler.ListPendingAgencies)
+			platformAdmin.PUT("/pending-agencies/:id/approve", b2bHandler.ApproveAgency)
+			platformAdmin.PUT("/pending-agencies/:id/reject", b2bHandler.RejectAgency)
+			platformAdmin.PUT("/agencies/:id/active", b2bHandler.SetAgencyActive)
+		}
+
+		// Admin user management (within organization)
+		adminUsers := api.Group("/admin-users")
+		adminUsers.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		adminUsers.Use(middleware.RoleMiddleware("owner"))
+		{
+			adminUsers.POST("", b2bHandler.CreateAdminUser)
+			adminUsers.GET("", b2bHandler.ListAdminUsers)
+			adminUsers.DELETE("/:id", b2bHandler.DeleteAdminUser)
+		}
+
+		// Public webhook endpoint
+		public := api.Group("/public")
+		{
+			public.POST("/webhook/whatsapp", func(c *gin.Context) {
+				// Placeholder for webhook handler
+				c.JSON(http.StatusOK, gin.H{"status": "webhook endpoint not implemented"})
+			})
+		}
 	}
 
-	// Authenticated routes (both owner and passenger)
-	auth := api.Group("")
-	auth.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-	{
-		// B2C: authenticated passenger
-		auth.GET("/bookings", b2cHandler.GetUserBookings)
-		auth.POST("/bookings", b2cHandler.BookTickets)
-		auth.PATCH("/bookings/:id/cancel", b2cHandler.CancelBooking)
-		auth.DELETE("/bookings/:id", b2cHandler.DeleteBooking)
-
-		// Ticket management
-		auth.PUT("/tickets/:id", b2cHandler.UpdateTicket)
-		auth.PATCH("/tickets/:id/cancel", b2cHandler.CancelTicket)
-
-		// Email verification (trigger resend)
-		auth.POST("/auth/send-verification", b2cHandler.SendVerificationEmail)
-
-		// User settings (both roles)
-		auth.GET("/auth/profile", b2cHandler.GetProfile)
-		auth.PUT("/auth/profile", b2cHandler.UpdateProfile)
-		auth.POST("/auth/change-password", b2cHandler.ChangePassword)
-		auth.DELETE("/auth/account", b2cHandler.DeleteAccount)
+	// Start server
+	port := cfg.Port
+	if port == "" {
+		port = "8080"
 	}
-
-	// B2B routes (owner only)
-	b2b := api.Group("")
-	b2b.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-	b2b.Use(middleware.RoleMiddleware("owner"))
-	{
-		// Buses
-		b2b.POST("/buses", b2bHandler.CreateBus)
-		b2b.GET("/buses", b2bHandler.ListBuses)
-		b2b.GET("/buses/:id", b2bHandler.GetBus)
-		b2b.PUT("/buses/:id", b2bHandler.UpdateBus)
-		b2b.DELETE("/buses/:id", b2bHandler.DeleteBus)
-		b2b.POST("/buses/:id/upload-image", b2bHandler.UploadBusImage)
-		b2b.GET("/tickets", b2bHandler.ListOrganizationTickets)
-
-		// Routes
-		b2b.POST("/routes", b2bHandler.CreateRoute)
-		b2b.GET("/routes", b2bHandler.ListRoutes)
-		b2b.GET("/routes/:id", b2bHandler.GetRoute)
-		b2b.DELETE("/routes/:id", b2bHandler.DeleteRoute)
-
-		// Journeys
-		b2b.POST("/journeys", b2bHandler.CreateJourney)
-		b2b.GET("/journeys", b2bHandler.ListJourneys)
-		b2b.PATCH("/journeys/:id/status", b2bHandler.UpdateJourneyStatus)
-
-		// QR Scan
-		b2b.POST("/scan", b2bHandler.ScanTicket)
-
-				// Admin management (owner-only)
-		b2b.POST("/admin/users", b2bHandler.CreateAdminUser)
-		b2b.GET("/admin/users", b2bHandler.ListAdminUsers)
-		b2b.DELETE("/admin/users/:id", b2bHandler.DeleteAdminUser)
-		// Analytics
-		b2b.GET("/analytics/dashboard", analyticsHandler.GetDashboardStats)
-		b2b.GET("/analytics/revenue", analyticsHandler.GetRevenueReport)
-	}
-
-	// Admin routes (super-admin only)
-	admin := r.Group("/api/admin")
-	admin.Use(middleware.AuthMiddleware(cfg.JWTSecret), middleware.RoleMiddleware("platform_admin"))
-	{
-		admin.GET("/pending-owners", b2bHandler.ListPendingOwners)
-		admin.POST("/owners/:id/approve", b2bHandler.ApproveOwner)
-		admin.POST("/owners/:id/reject", b2bHandler.RejectOwner)
-		admin.GET("/pending-agencies", b2bHandler.ListPendingAgencies)
-		admin.POST("/agencies/:id/approve", b2bHandler.ApproveAgency)
-		admin.POST("/agencies/:id/reject", b2bHandler.RejectAgency)
-		admin.GET("/agencies", b2bHandler.ListAgencies)
-		admin.PATCH("/agencies/:id/status", b2bHandler.SetAgencyActive)
-		admin.POST("/agencies/:id/impersonate", b2bHandler.ImpersonateOwner)
-		admin.GET("/exchange-rate", adminHandler.GetExchangeRate)
-		admin.PUT("/exchange-rate", adminHandler.UpdateExchangeRate)
-	}
-
-	// Platform routes (super-admin only)
-	platform := r.Group("/api/platform")
-	platform.Use(middleware.AuthMiddleware(cfg.JWTSecret), middleware.RoleMiddleware("platform_admin"))
-	{
-		platform.GET("/agencies", b2bHandler.ListAgencies)
-		platform.GET("/pending-agencies", b2bHandler.ListPendingAgencies)
-	}
-
-	log.Printf("Server starting on port %s", cfg.Port)
-	if err := r.Run(":" + cfg.Port); err != nil {
+	log.Printf("Server starting on port %s", port)
+	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
 }

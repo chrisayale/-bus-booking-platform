@@ -1,0 +1,486 @@
+package handlers
+
+import (
+	"database/sql"
+	"fmt"
+	"net/http"
+	"strings"
+
+	"github.com/bus-booking/BE-bus-booking-platform/internal/models"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
+t"github.com/jmobron/sqlx"
+	"github.com/gin-gonic/gin"
+)
+)
+)
+	"github.com/jmoiron/sqlx"
+)
+
+// AdminHandler handles admin-related HTTP requests
+type AdminHandler struct {
+	DB *sqlx.DB
+}
+
+// NewAdminHandler creates a new AdminHandler with the given database connection
+func NewAdminHandler(db *sqlx.DB) *AdminHandler {
+	return &AdminHandler{DB: db}
+}
+
+// GetExchangeRate godoc
+// @Summary Récupère le taux de change actuel USD→CDF
+// @description Retourne le taux de change configuré par le Super Admin
+// @id get-exchange-rate
+// @tags admin
+// @produce json
+// @success 200 {object} map[string]float64
+// @failure 500 {object} map[string]string
+// @router /admin/exchange-rate [get]
+func (h *AdminHandler) GetExchangeRate(c *gin.Context) {
+	rate, err := models.GetCurrent(h.DB)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{
+		"usd_to_cdf": rate.USDToCDF,
+		"cdf_to_usd": 1 / rate.USDToCDF,
+	})
+}
+
+// UpdateExchangeRate godoc
+// @Summary Met à jour le taux de change USD→CDF
+// @description Permet au Super Admin de modifier le taux de change
+// @id update-exchange-rate
+// @tags admin
+// @accept json
+// @produce json
+// @param rate body map[string]float64 true "Nouveau taux de change"
+// @success 200 {object} map[string]string
+// @failure 400 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/exchange-rate [put]
+func (h *AdminHandler) UpdateExchangeRate(c *gin.Context) {
+	var payload struct {
+		USDToCDF float64 `json:"usd_to_cdf" binding:"required,gt=0"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload invalide: " + err.Error()})
+		return
+	}
+
+	// TODO: Récupérer l'utilisateur depuis le contexte (à adapter selon votre système d'auth)
+	// Pour l'instant, nous utilisons un placeholder. En production, vous devriez extraire l'ID utilisateur du JWT ou du contexte.
+	userID := "super_admin" // À remplacer par l'ID réel de l'utilisateur authentifié
+
+	current, err := models.GetCurrent(h.DB)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	if err := current.Update(h.DB, payload.USDToCDF, userID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "Taux de change mis à jour avec succès"})
+}
+
+// GetUsers godoc
+// @Summary Récupère la liste des utilisateurs avec filtres optionnels
+// @description Permet au Super Admin de récupérer la liste des utilisateurs, éventuellement filtrée par rôle ou organisation
+// @id get-users
+// @tags admin
+// @produce json
+// @param role query string false "Filtrer par rôle (owner, passenger, platform_admin, agent, controller)"
+// @param organization_id query string false "Filtrer par organisation"
+// @success 200 {array} models.User
+// @failure 500 {object} map[string]string
+// @router /admin/users [get]
+func (h *AdminHandler) GetUsers(c *gin.Context) {
+	role := c.Query("role")
+	organizationID := c.Query("organization_id")
+
+	var users []models.User
+	var err error
+
+	query := `
+		SELECT u.id, u.email, u.full_name, u.phone, u.role, u.organization_id, u.is_verified, u.created_at, u.updated_at, u.pin
+		FROM users u
+	`
+	var args []interface{}
+	var conditions []string
+
+	if role != "" {
+		// Check if role parameter contains commas (multiple roles)
+		if strings.Contains(role, ",") {
+			// Handle multiple roles: role=agent,controller
+			roleValues := strings.Split(role, ",")
+			placeholders := make([]string, len(roleValues))
+			// Calculate starting index for placeholders
+			startIndex := len(args) + 1
+			for i := range roleValues {
+				placeholders[i] = fmt.Sprintf("$%d", startIndex+i)
+				args = append(args, strings.TrimSpace(roleValues[i]))
+			}
+			conditions = append(conditions, fmt.Sprintf("u.role IN (%s)", strings.Join(placeholders, ", ")))
+		} else {
+			// Single role (backward compatibility)
+			conditions = append(conditions, fmt.Sprintf("u.role = $%d", len(args)+1))
+			args = append(args, role)
+		}
+	}
+	if organizationID != "" {
+		conditions = append(conditions, fmt.Sprintf("u.organization_id = $%d", len(args)+1))
+		args = append(args, organizationID)
+	}
+
+	if len(conditions) > 0 {
+		query += " WHERE " + strings.Join(conditions, " AND ")
+	}
+
+	query += "\n		ORDER BY u.created_at DESC"
+
+	if err = h.DB.Select(&users, query, args...); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch users: " + err.Error()})
+		return
+	}
+
+	// For each user, fetch their organizations via the join table
+	for i := range users {
+		var orgs []models.Organization
+		h.DB.Select(&orgs, `
+			SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
+			FROM organizations o
+			JOIN user_organizations uo ON o.id = uo.organization_id
+			WHERE uo.user_id = $1
+		`, users[i].ID)
+		users[i].Organizations = orgs
+	}
+
+	c.JSON(http.StatusOK, users)
+}
+
+// CreateUser godoc
+// @Summary Crée un nouvel utilisateur
+// @description Permet au Super Admin de créer un nouvel utilisateur (agent ou controller) et de l'associer à une ou plusieurs organisations
+// @id create-user
+// @tags admin
+// @accept json
+// @produce json
+// @param user body models.User true "Données de l'utilisateur"
+// @success 201 {object} models.User
+// @failure 400 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/users [post]
+func (h *AdminHandler) CreateUser(c *gin.Context) {
+	var input struct {
+		Email            string   `json:"email" binding:"required,email"`
+		Password         string   `json:"password" binding:"required,min=4"` // PIN is 4 digits
+		FullName         string   `json:"full_name" binding:"required"`
+		Phone            *string  `json:"phone"`
+		Role             string   `json:"role" binding:"required,oneof=agent controller"`
+		OrganizationIDs  []string `json:"organization_ids"`
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Données invalides: " + err.Error()})
+		return
+	}
+
+	// Check if email exists
+	var count int
+	if err := h.DB.Get(&count, `SELECT COUNT(*) FROM users WHERE email = $1`, input.Email); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check email"})
+		return
+	}
+	if count > 0 {
+		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
+		return
+	}
+
+	// Hash the password (PIN)
+	hash, err := utils.HashPassword(input.Password)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		return
+	}
+
+	// We'll set organization_id to the first organization if any, otherwise null
+	var organizationID *string
+	if len(input.OrganizationIDs) > 0 {
+		organizationID = &input.OrganizationIDs[0]
+	}
+
+	var user models.User
+	// Handle phone number for nullable field
+	var phoneNull *string
+	if input.Phone != nil {
+		phoneNull = models.NullString(*input.Phone)
+	} else {
+		phoneNull = models.NullString("")
+	}
+	row := h.DB.QueryRowx(`
+		INSERT INTO users (email, password_hash, full_name, phone, role, organization_id, is_verified, pin)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8)
+		RETURNING id, email, full_name, phone, role, organization_id, is_verified, created_at, updated_at, pin
+	`, input.Email, hash, input.FullName, phoneNull, input.Role, organizationID, true, input.Password)
+	err = row.Scan(&user.ID, &user.Email, &user.FullName, &user.Phone, &user.Role, &user.OrganizationID, &user.IsVerified, &user.CreatedAt, &user.UpdatedAt, &user.Pin)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user: " + err.Error()})
+		return
+	}
+
+	// Create user_organization entries for each organization
+	for _, orgID := range input.OrganizationIDs {
+		_, err := h.DB.Exec(`
+			INSERT INTO user_organizations (user_id, organization_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, user.ID, orgID)
+		if err != nil {
+			// Log error but continue
+			// In a production system, you might want to rollback or return an error
+		}
+	}
+
+	// Fetch the created user with organizations
+	var orgs []models.Organization
+	h.DB.Select(&orgs, `
+		SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
+		FROM organizations o
+		JOIN user_organizations uo ON o.id = uo.organization_id
+		WHERE uo.user_id = $1
+	`, user.ID)
+	user.Organizations = orgs
+
+	c.JSON(http.StatusCreated, user)
+}
+
+// GetUserById godoc
+// @Summary Récupère un utilisateur par son ID
+// @description Permet au Super Admin de récupérer les détails d'un utilisateur spécifique
+// @id get-user-by-id
+// @tags admin
+// @produce json
+// @param id path string true "ID de l'utilisateur"
+// @success 200 {object} models.User
+// @failure 404 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/users/{id} [get]
+func (h *AdminHandler) GetUserById(c *gin.Context) {
+	userID := c.Param("id")
+
+	var user models.User
+	err := h.DB.Get(&user, `
+		SELECT id, email, full_name, phone, role, organization_id, is_verified, created_at, updated_at, pin
+		FROM users WHERE id = $1
+	`, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "utilisateur non trouvé"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch user: " + err.Error()})
+		}
+		return
+	}
+
+	// Fetch organizations
+	var orgs []models.Organization
+	h.DB.Select(&orgs, `
+		SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
+		FROM organizations o
+		JOIN user_organizations uo ON o.id = uo.organization_id
+		WHERE uo.user_id = $1
+	`, userID)
+	user.Organizations = orgs
+
+	c.JSON(http.StatusOK, user)
+}
+
+// UpdateUser godoc
+// @Summary Met à jour un utilisateur
+// @description Permet au Super Admin de mettre à jour les informations d'un utilisateur existant
+// @id update-user
+// @tags admin
+// @accept json
+// @produce json
+// @param id path string true "ID de l'utilisateur"
+// @param user body models.User true "Données mises à jour de l'utilisateur"
+// @success 200 {object} models.User
+// @failure 400 {object} map[string]string
+// @failure 404 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/users/{id} [put]
+func (h *AdminHandler) UpdateUser(c *gin.Context) {
+	userID := c.Param("id")
+
+	var input struct {
+		FullName         string   `json:"full_name"`
+		Phone            *string  `json:"phone"`
+		Role             string   `json:"role" binding:"omitempty,oneof=agent controller"`
+		OrganizationIDs  []string `json:"organization_ids"`
+		// Note: PIN update would require a separate endpoint for security reasons
+	}
+
+	if err := c.ShouldBindJSON(&input); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Données invalides: " + err.Error()})
+		return
+	}
+
+	// Check if user exists
+	var existingUser models.User
+	err := h.DB.Get(&existingUser, `SELECT id FROM users WHERE id = $1`, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "utilisateur non trouvé"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check user: " + err.Error()})
+		}
+		return
+	}
+
+	// Start transaction
+	tx, err := h.DB.Beginx()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Update user basic info
+	// Handle phone number for nullable field
+	var phoneNull *string
+	if input.Phone != nil {
+		phoneNull = models.NullString(*input.Phone)
+	} else {
+		phoneNull = models.NullString("")
+	}
+	_, err = tx.Exec(`
+		UPDATE users SET
+			full_name = $1,
+			phone = $2,
+			role = COALESCE(NULLIF($3, ''), role),
+			updated_at = NOW()
+		WHERE id = $4
+	`, input.FullName, phoneNull, input.Role, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user: " + err.Error()})
+		return
+	}
+
+	// Update organization associations
+	// First, delete existing associations
+	_, err = tx.Exec(`DELETE FROM user_organizations WHERE user_id = $1`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to reset user organizations: " + err.Error()})
+		return
+	}
+	// Then insert new ones
+	for _, orgID := range input.OrganizationIDs {
+		_, err = tx.Exec(`
+			INSERT INTO user_organizations (user_id, organization_id)
+			VALUES ($1, $2)
+			ON CONFLICT DO NOTHING
+		`, userID, orgID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to add user organization: " + err.Error()})
+			return
+		}
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction: " + err.Error()})
+		return
+	}
+
+	// Fetch updated user with organizations
+	var user models.User
+	err = h.DB.Get(&user, `
+		SELECT id, email, full_name, phone, role, organization_id, is_verified, created_at, updated_at, pin
+		WHERE id = $1
+	`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch updated user: " + err.Error()})
+		return
+	}
+
+	var orgs []models.Organization
+	h.DB.Select(&orgs, `
+		SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
+		FROM organizations o
+		JOIN user_organizations uo ON o.id = uo.organization_id
+		WHERE uo.user_id = $1
+	`, userID)
+	user.Organizations = orgs
+
+	c.JSON(http.StatusOK, user)
+}
+
+// DeleteUser godoc
+// @Summary Supprime un utilisateur
+// @description Permet au Super Admin de supprimer un utilisateur (en cascade avec les associations)
+// @id delete-user
+// @tags admin
+// @produce json
+// @param id path string true "ID de l'utilisateur"
+// @success 200 {object} map[string]string
+// @failure 404 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/users/{id} [delete]
+func (h *AdminHandler) DeleteUser(c *gin.Context) {
+	userID := c.Param("id")
+
+	// Check if user exists
+	var existingUser models.User
+	err := h.DB.Get(&existingUser, `SELECT id FROM users WHERE id = $1`, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "utilisateur non trouvé"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check user: " + err.Error()})
+		}
+		return
+	}
+
+	// Start transaction
+	tx, err := h.DB.Beginx()
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to start transaction"})
+		return
+	}
+	defer tx.Rollback()
+
+	// Delete user_organizations first (due to foreign key constraints)
+	_, err = tx.Exec(`DELETE FROM user_organizations WHERE user_id = $1`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete user organizations: " + err.Error()})
+		return
+	}
+
+	// Delete user
+	_, err = tx.Exec(`DELETE FROM users WHERE id = $1`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to delete user: " + err.Error()})
+		return
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction: " + err.Error()})
+		return
+	}
+
+	c.JSON(http.StatusOK, gin.H{"message": "utilisateur supprimé avec succès"})
+}
+
+// Helper function to convert nil string to empty string for JSON serialization
+func NullString(s *string) string {
+	if s == nil {
+		return ""
+	}
+	return *s
+}

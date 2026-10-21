@@ -23,6 +23,7 @@ import Passengers from "./pages/b2b/Passengers"
 import Revenue from "./pages/b2b/Revenue"
 import Counter from "./pages/b2b/Counter"
 import PlatformAdmin from "./pages/PlatformAdmin"
+import AgentManagement from "./pages/AgentManagement"
 import Search from "./pages/b2c/Search"
 import Booking from "./pages/b2c/Booking"
 import MyBookings from "./pages/b2c/MyBookings"
@@ -68,6 +69,7 @@ function AppRoutes() {
         <Route path="/owner/revenue" element={<ProtectedRoute ownerOnly><Revenue /></ProtectedRoute>} />
         <Route path="/owner/counter" element={<ProtectedRoute ownerOnly><Counter /></ProtectedRoute>} />
         <Route path="/platform/pending-owners" element={<ProtectedRoute platformAdminOnly><PlatformAdmin /></ProtectedRoute>} />
+        <Route path="/platform/agents" element={<ProtectedRoute platformAdminOnly><AgentManagement /></ProtectedRoute>} />
       </Route>
     </Routes>
   )

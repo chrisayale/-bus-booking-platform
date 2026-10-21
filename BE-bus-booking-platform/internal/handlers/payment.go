@@ -142,3 +142,33 @@ func (h *PaymentHandler) FlexPayCallback(c *gin.Context) {
 		c.JSON(http.StatusOK, gin.H{"status": "ok"})
 	}
 }
+
+// FlexPayApprove handles the redirect URL for approved payments
+func (h *PaymentHandler) FlexPayApprove(c *gin.Context) {
+	// This is just a visual redirect for the client
+	// Payment status should be verified via the webhook (callback_url)
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "approved",
+		"message": "Payment approved. You will be redirected shortly.",
+	})
+}
+
+// FlexPayCancel handles the redirect URL for cancelled payments
+func (h *PaymentHandler) FlexPayCancel(c *gin.Context) {
+	// This is just a visual redirect for the client
+	// Payment status should be verified via the webhook (callback_url)
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "cancelled",
+		"message": "Payment cancelled. You will be redirected shortly.",
+	})
+}
+
+// FlexPayDecline handles the redirect URL for declined payments
+func (h *PaymentHandler) FlexPayDecline(c *gin.Context) {
+	// This is just a visual redirect for the client
+	// Payment status should be verified via the webhook (callback_url)
+	c.JSON(http.StatusOK, gin.H{
+		"status":  "declined",
+		"message": "Payment declined. You will be redirected shortly.",
+	})
+}

@@ -1,0 +1,465 @@
+package whatsapp
+
+import (
+	"context"
+	"database/sql"
+	"fmt"
+	"log"
+	"strconv"
+	"strings"
+	"time"
+
+	"github.com/jmoiron/sqlx"
+	qrcode "github.com/skip2/go-qrcode"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
+	"go.mau.fi/whatsmeow"
+	"go.mau.fi/whatsmeow/proto/waE2E"
+	"go.mau.fi/whatsmeow/types"
+	"go.mau.fi/whatsmeow/types/events"
+	"google.golang.org/protobuf/proto"
+)
+
+// THIS IS A TEST TO SEE IF THE FILE IS BEING UPDATED CORRECTLY
+
+const welcomeMenu = `Bienvenue sur GUV (Guichet unique des voyages) 🚌
+
+1️⃣ Recherche directe de voyages
+2️⃣ Recherche par agence
+3️⃣ Créer une agence
+4️⃣ Vérification / Guichet
+5️⃣ Aide & Assistance
+
+Répondez avec le numéro de votre choix.`
+
+func init() {
+	_ = fmt.Sprintf("%T", (*sqlx.DB)(nil))
+}
+
+func GetRealPhoneNumber(client *whatsmeow.Client, jid types.JID) string {
+	if jid.Server == "s.whatsapp.net" {
+		return jid.User
+	}
+	if jid.Server == "lid" && client != nil && client.Store != nil {
+		pnJID, err := client.Store.LIDs.GetPNForLID(context.Background(), jid)
+		if err == nil && !pnJID.IsEmpty() && pnJID.Server == "s.whatsapp.net" {
+			return pnJID.User
+		}
+	}
+	return jid.User
+}
+
+// getPromptForStep returns the appropriate prompt for the current step of the session.
+func getPromptForStep(s *Session) string {
+	switch s.Step {
+	case StepMenu:
+		return welcomeMenu
+	case StepSearchOrigin:
+		return "🏁 Lieu de départ ?"
+	case StepSearchDestination:
+		return "🎯 Lieu de destination ?"
+	case StepSearchDateChoice:
+		return "📅 Quelle date ?\n\n1️⃣ Aujourd'hui\n2️⃣ Saisir une date\n\nRépondez avec le numéro de votre choix."
+	case StepSearchDate:
+		return "📅 Entrez la date du voyage (ex : 13/09/2026 ou 13 septembre 2026)."
+	case StepSearchResults:
+		// This step expects a dynamic prompt based on s.Results, but we return a generic one.
+		// The normal flow will override this by building the prompt before calling getPromptForStep.
+		return "🔢 Tapez le numéro du voyage choisi."
+	case StepSeatsCount:
+		return "💺 Combien de sièges voulez-vous réserver ?"
+	case StepPassengerName:
+		if s.CurrentPassengerIndex < s.SeatsNeeded {
+			return fmt.Sprintf("👤 Passager %d/%d — Nom complet ?", s.CurrentPassengerIndex+1, s.SeatsNeeded)
+		}
+		return "👤 Nom complet du passager ?" // fallback
+	case StepPassengerPhone:
+		return "📱 Numéro de téléphone de ce passager (ou tapez * pour passer) ?"
+	case StepConfirm:
+		// Build summary without duplicating the confirmation question
+		summary := buildConfirmSummary(s)
+		// Remove any trailing confirmation question if it exists in the summary
+		summary = strings.TrimSuffix(summary, "\n\nConfirmez-vous la réservation ? (oui/non)")
+		summary = strings.TrimSuffix(summary, "\n\n✅ Confirmez-vous la réservation ? (oui/non)")
+		return summary + "\n\n✅ Confirmez-vous la réservation ? (oui/non)"
+	case StepPaymentMethodChoice:
+		return "💳 Comment voulez-vous payer ?\n\n1️⃣ Payer en espèces\n2️⃣ Mobile Money (Airtel, M-Pesa, Orange, AfriMoney)\n3️⃣ Payer par carte (Visa, Mastercard)\n\nRépondez avec le numéro de votre choix."
+	case StepCurrencyChoice:
+		return "💰 Quelle devise souhaitez-vous utiliser pour le paiement ?\n\n1️⃣ USD (Dollars)\n2️⃣ CDF (Franc congolais)\n\nRépondez avec le numéro de votre choix."
+	case StepPhonePaymentChoice:
+		return "📱 Choisissez le numéro de téléphone pour Mobile Money :\n\n1️⃣ Utiliser mon numéro WhatsApp\n2️⃣ Saisir un autre numéro\n\nRépondez avec le numéro de votre choix."
+	case StepFlexPayPhoneInput:
+		return "📱 Entrez le numéro de téléphone pour Mobile Money (format : 243XXXXXXXXX) :"
+	case StepPaymentProcessing:
+		// Compute amount and phone number for display
+		baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+		var totalAmount float64
+		var paymentNumber string
+		if s.Currency == "CDF" {
+			rate, err := utils.GetCurrentExchangeRate(DB)
+			if err != nil {
+				log.Printf("Error getting exchange rate: %v, using default 2850", err)
+				rate = 2850
+			}
+			totalAmount = baseAmountUSD * rate
+		} else {
+			totalAmount = baseAmountUSD
+		}
+		if s.PaymentPhone != "" {
+			paymentNumber = s.PaymentPhone
+		} else {
+			// Use WhatsApp number
+			paymentNumber = GetRealPhoneNumber(Client, types.JID{User: s.UserPhone, Server: "s.whatsapp.net"})
+			if paymentNumber == "" {
+				paymentNumber = s.UserPhone // fallback
+			}
+		}
+		return fmt.Sprintf("💳 CONFIRMATION DU PAIEMENT\n\n• Montant : %.2f %s\n• Numéro de paiement : %s\n\nVoulez-vous valider le paiement ?\n\n1️⃣ Oui (Lancer le paiement)\n2️⃣ Non (Annuler)", totalAmount, s.Currency, paymentNumber)
+	case StepPaymentProcessingWait:
+		return "⏳ Traitement en cours...\nVeuillez patienter pendant que nous contactons le service de paiement."
+	case StepPaymentCompleted:
+		// Compute amount for display
+		baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+		var totalAmount float64
+		if s.Currency == "CDF" {
+			rate, err := utils.GetCurrentExchangeRate(DB)
+			if err != nil {
+				log.Printf("Error getting exchange rate: %v, using default 2850", err)
+				rate = 2850
+			}
+			totalAmount = baseAmountUSD * rate
+		} else {
+			totalAmount = baseAmountUSD
+		}
+		// Get payment number for display
+		var paymentNumber string
+		if s.PaymentPhone != "" {
+			paymentNumber = s.PaymentPhone
+		} else {
+			// Use WhatsApp number
+			paymentNumber = GetRealPhoneNumber(Client, types.JID{User: s.UserPhone, Server: "s.whatsapp.net"})
+			if paymentNumber == "" {
+				paymentNumber = s.UserPhone // fallback
+			}
+		}
+		return fmt.Sprintf("📱 Un message USSD de confirmation de %.2f %s vient d'être envoyé sur le numéro %s.\n🔒 Veuillez saisir votre code PIN Mobile Money sur votre téléphone pour valider.\n⏳ Une fois validé, vous recevrez votre billet ici automatiquement !", totalAmount, s.Currency, paymentNumber)
+	case StepAgencyChoice:
+		var b strings.Builder
+		b.WriteString("🏢 Agences actives :\n\n")
+		for i, a := range s.Agencies {
+			b.WriteString(fmt.Sprintf("%s %s\n", numberEmoji(i+1), a.Name))
+		}
+		b.WriteString("\nRépondez avec le numéro de l'agence choisie.")
+		return b.String()
+	case StepAgencyMenu:
+		return fmt.Sprintf("🏢 %s\n\n1️⃣ Voir la liste des voyages disponibles\n2️⃣ Rechercher un voyage\n\nRépondez avec le numéro de votre choix.", s.SelectedAgency.Name)
+	case StepAgencyDateChoice:
+		return "📅 Quelle date ?\n\n1️⃣ Aujourd'hui\n2️⃣ Saisir une date\n\nRépondez avec le numéro de votre choix."
+	case StepAgencyDateInput:
+		return "📅 Entrez la date du voyage (ex : 13/09/2026 ou 13 septembre 2026)."
+	case StepAgencyVoyages:
+		return "💺 Combien de sièges voulez-vous réserver ?"
+	case StepMyTicketsPhone:
+		return "📱 Entrez le numéro de téléphone pour chercher vos billets :"
+	case StepMyTicketsList:
+		if len(s.Tickets) == 0 {
+			return "Aucun billet trouvé pour ce numéro."
+		}
+		return formatMyTickets(s.Tickets)
+	case StepAgencyName:
+		return "🏢 Nom de l'agence ?"
+	case StepAgencyManagerName:
+		return "👔 Nom complet du responsable ?"
+	case StepAgencyAddress:
+		return "📍 Ville / Adresse ?"
+	case StepAgencyContactPhone:
+		return "📞 Numéro de téléphone officiel de l'agence ?"
+	case StepAgencyConfirm:
+		return fmt.Sprintf("✅ Veuillez confirmer les informations de l'agence :\n\nNom de l'agence : %s\nResponsable : %s\nAdresse : %s\nTéléphone : %s\n\nRépondez par 'oui' pour confirmer ou 'menu' pour annuler.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
+	case StepPasswordChangeMenu:
+		return "🔑 Voulez-vous changer votre mot de passe ?\n\n1️⃣ Oui\n2️⃣ Non\n\nRépondez avec le numéro de votre choix."
+	case StepVerificationMenu:
+		return "🔍 Vérification / Guichet\n\n1️⃣ Voir mes billets\n2️⃣ Guichet Contrôleur\n3️⃣ Retour au menu\n\nRépondez avec le numéro de votre choix."
+	case StepMyTicketDetails:
+		return "Appuyez sur un numéro de billet pour voir ses détails ou *menu* pour revenir au menu principal."
+	case StepControllerPin:
+		return "👮‍♂️ *Guichet Contrôleur - Authentification*\n\nVeuillez saisir votre code PIN agent :"
+	case StepControllerActions:
+		return "Sélectionnez une action :\n1️⃣ Valider le paiement\n2️⃣ Faire le check-in\n\nRépondez avec le numéro de votre choix."
+	default:
+		return "❓ Étape inconnue. Tapez *menu* pour revenir au menu principal."
+	}
+	return ""
+}
+
+func formatDate(dateStr string) string {
+	if dateStr == "" {
+		return ""
+	}
+	parts := strings.Split(dateStr, "-")
+	if len(parts) != 3 {
+		return dateStr
+	}
+	return fmt.Sprintf("%s/%s/%s", parts[2], parts[1], parts[0])
+}
+
+func formatTime(timeStr string) string {
+	if timeStr == "" {
+		return ""
+	}
+	parts := strings.Split(timeStr, ":")
+	if len(parts) < 2 {
+		return timeStr
+	}
+	hour := parts[0]
+	minute := parts[1]
+	if len(hour) == 1 {
+		hour = "0" + hour
+	}
+	if len(minute) == 1 {
+		minute = "0" + minute
+	}
+	return fmt.Sprintf("%sh%s", hour, minute)
+}
+
+func calculateDuration(startTimeStr, endTimeStr string) string {
+	if startTimeStr == "" || endTimeStr == "" {
+		return ""
+	}
+
+	startParts := strings.Split(startTimeStr, ":")
+	if len(startParts) < 2 {
+		return ""
+	}
+	startHour, err1 := strconv.Atoi(startParts[0])
+	startMinute, err2 := strconv.Atoi(startParts[1])
+	if err1 != nil || err2 != nil {
+		return ""
+	}
+
+	endParts := strings.Split(endTimeStr, ":")
+	if len(endParts) < 2 {
+		return ""
+	}
+	endHour, err3 := strconv.Atoi(endParts[0])
+	endMinute, err4 := strconv.Atoi(endParts[1])
+	if err3 != nil || err4 != nil {
+		return ""
+	}
+
+	startTotal := startHour*60 + startMinute
+	endTotal := endHour*60 + endMinute
+
+	if endTotal < startTotal {
+		endTotal += 24 * 60
+	}
+
+	durationMinutes := endTotal - startTotal
+	durationHours := durationMinutes / 60
+	durationMins := durationMinutes % 60
+
+	return fmt.Sprintf("%dh%02d", durationHours, durationMins)
+}
+
+func formatMyTickets(tickets []CreatedTicket) string {
+	if len(tickets) == 0 {
+		return "Aucun billet trouvé."
+	}
+	var b strings.Builder
+	b.WriteString("Voici vos billets :\n\n")
+	for i, t := range tickets {
+		b.WriteString(fmt.Sprintf("%s Billet %d\n", numberEmoji(i+1), i+1))
+		b.WriteString(fmt.Sprintf("   Passenger : %s\n", t.PassengerName))
+		b.WriteString(fmt.Sprintf("   Siège     : %s\n", t.SeatNumber))
+		b.WriteString(fmt.Sprintf("   Prix      : %.2f USD\n", t.Price))
+		b.WriteString(fmt.Sprintf("   Télécharger : %s\n\n", t.DownloadURL))
+	}
+	return b.String()
+}
+
+// formatTicketDetail returns the formatted details for a single ticket
+func formatTicketDetail(t *CreatedTicket) string {
+	if t == nil {
+		return "Billet non trouvé."
+	}
+	var b strings.Builder
+	b.WriteString("🪪 Détails du billet :\n")
+	b.WriteString(fmt.Sprintf("• Passager : %s\n", t.PassengerName))
+	b.WriteString(fmt.Sprintf("• Téléphone : %s\n", t.PassengerPhone))
+	b.WriteString(fmt.Sprintf("• Agence : %s\n", t.AgencyName))
+	// Format trajet: origin ➔ destination
+	b.WriteString(fmt.Sprintf("• Trajet : %s ➔ %s\n", t.DepartureCity, t.ArrivalCity))
+
+	// Helper function to extract date in DD/MM/YYYY format from various string formats
+	formatDate := func(dateStr string) string {
+		if dateStr == "" {
+			return "??/??/????"
+		}
+		// Try to parse as "YYYY-MM-DD" (standard SQL DATE format)
+		if len(dateStr) >= 10 && dateStr[4] == '-' && dateStr[7] == '-' {
+			return fmt.Sprintf("%s/%s/%s", dateStr[8:10], dateStr[5:7], dateStr[0:4])
+		}
+		// Try to parse as "DD/MM/YYYY"
+		if len(dateStr) >= 10 && dateStr[2] == '/' && dateStr[5] == '/' {
+			return dateStr
+		}
+		// Try to extract DD/MM/YYYY from mixed formats
+		// Look for patterns like MM/DD/YYYY or DD-MM-YYYY
+		parts := []string{}
+		for _, sep := range []string{"-", "/"} {
+			if strings.contains(dateStr, sep) {
+				parts = strings.Split(dateStr, sep)
+				if len(parts) == 3 {
+					// Try to interpret as YYYY-MM-DD
+					if y, err := strconv.Atoi(parts[0]); err == nil && y >= 2000 && y <= 2099 {
+						if m, err := strconv.Atoi(parts[1]); err == nil && m >= 1 && m <= 12 {
+							if d, err := strconv.Atoi(parts[2]); err == nil && d >= 1 && d <= 31 {
+								return fmt.Sprintf("%02d/%02d/%d", d, m, y)
+							}
+						}
+					}
+					// Try to interpret as MM-DD-YYYY or DD-MM-YYYY
+					if len(parts[0]) == 2 && len(parts[1]) == 2 && len(parts[2]) == 4 {
+						if d, err := strconv.Atoi(parts[0]); err == nil && d >= 1 && d <= 31 {
+							if m, err := strconv.Atoi(parts[1]); err == nil && m >= 1 && m <= 12 {
+								return fmt.Sprintf("%s/%s/%s", parts[0], parts[1], parts[2])
+							}
+						}
+					}
+				}
+			}
+		}
+		// Fallback: return first 10 chars or whatever we have
+		if len(dateStr) >= 10 {
+			return dateStr[:10]
+		}
+		return dateStr
+	}
+
+	// Helper function to extract time in HH:MM format from various string formats
+	formatTime := func(timeStr string) string {
+		if timeStr == "" {
+			return "00:00"
+		}
+		// Try to parse as "HH:MM:SS"
+		if len(timeStr) >= 8 && timeStr[2] == ':' && timeStr[5] == ':' {
+			return timeStr[0:5]
+		}
+		// Try to parse as "HH:MM"
+		if len(timeStr) >= 5 && timeStr[2] == ':' {
+			return timeStr[0:5]
+		}
+		// Try to extract HH:MM from mixed formats
+		// Look for patterns with colons
+		parts := strings.Split(timeStr, ":")
+		if len(parts) >= 2 {
+			if h, err := strconv.Atoi(parts[0]); err == nil && h >= 0 && h <= 23 {
+				if m, err := strconv.Atoi(parts[1]); err == nil && m >= 0 && m <= 59 {
+					return fmt.Sprintf("%02d:%02d", h, m)
+				}
+			}
+		}
+		// Look for patterns with 'h' or 'H' as separator
+		for _, sep := range []string{"h", "H"} {
+			if strings.contains(timeStr, sep) {
+				parts = strings.Split(timeStr, sep)
+				if len(parts) >= 2 {
+					if h, err := strconv.Atoi(parts[0]); err == nil && h >= 0 && h <= 23 {
+						if m, err := strconv.Atoi(parts[1]); err == nil && m >= 0 && m <= 59 {
+							return fmt.Sprintf("%02d:%02d", h, m)
+						}
+					}
+				}
+			}
+		}
+		// Try to extract first 4-5 characters that look like HH:MM
+		if len(timeStr) >= 4 {
+			// Check if we have HH:M or HHMM pattern
+			if len(timeStr) >= 5 && (timeStr[2] == ':' || timeStr[2] == 'h' || timeStr[2] == 'H') {
+				if h, err := strconv.Atoi(timeStr[0:2]); err == nil && h >= 0 && h <= 23 {
+					if m, err := strconv.Atoi(string(timeStr[3])); err == nil && m >= 0 && m <= 9 {
+						return fmt.Sprintf("%02d:%01d", h, m)
+					}
+					if m, err := strconv.Atoi(timeStr[3:5]); err == nil && m >= 0 && m <= 59 {
+						return fmt.Sprintf("%02d:%02d", h, m)
+					}
+				}
+			}
+			if len(timeStr) >= 4 {
+				if h, err := strconv.Atoi(timeStr[0:2]); err == nil && h >= 0 && h <= 23 {
+					if m, err := strconv.Atoi(timeStr[2:4]); err == nil && m >= 0 && m <= 59 {
+						return fmt.Sprintf("%02d:%02d", h, m)
+					}
+				}
+			}
+		}
+		// Fallback
+		return "00:00"
+	}
+
+	// Format date and time for departure
+	departDateFormatted := formatDate(t.Date)
+	departTimeFormatted := formatTime(t.DepartureTime)
+	b.WriteString(fmt.Sprintf("• Départ : %s à %s\n", departDateFormatted, departTimeFormatted))
+	// Format date and time for arrival
+	arriveDateFormatted := formatDate(t.ArrivalDate)
+	arriveTimeFormatted := formatTime(t.ArrivalTime)
+	b.WriteString(fmt.Sprintf("• Arrivée : %s à %s\n", arriveDateFormatted, arriveTimeFormatted))
+	// Format siège
+	b.WriteString(fmt.Sprintf("• Siège : N° %s\n", t.SeatNumber))
+	// Format prix
+	b.WriteString(fmt.Sprintf("• Prix : %.2f USD\n", t.Price))
+	// Paiement hardcoded to Espèces
+	b.WriteString("• Paiement : Espèces\n")
+	// Statut
+	b.WriteString(fmt.Sprintf("• Statut : %s\n", t.Status))
+	// Blank line
+	b.WriteString("\n")
+	// Télécharger le billet PDF
+	b.WriteString("📦 Télécharger le billet PDF :\n")
+	if t.DownloadURL != "" {
+		b.WriteString(t.DownloadURL + "\n")
+	} else {
+		b.WriteString("URL non disponible\n")
+	}
+	// Blank line
+	b.WriteString("\n")
+	// Instruction pour retourner au menu
+	b.WriteString("Tapez menu pour retourner au menu principal.")
+	return b.String()
+}
+
+func RegisterHandlers() {
+	log.Printf("[INFO] Registering WhatsApp event handlers")
+	Client.AddEventHandler(func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.Message:
+			text := extractText(v)
+			if text == "" {
+				return
+			}
+			log.Printf("Received message from %s: %q", v.Info.Sender.User, text)
+			handleIncomingMessage(v)
+		}
+	})
+}
+
+// TODO: Test edit
+func handleIncomingMessage(evt *events.Message) {
+	if evt.Info.IsFromMe {
+		return
+	}
+
+	text := strings.TrimSpace(extractText(evt))
+	if text == "" {
+		return
+	}
+
+	sender := evt.Info.Sender
+	phone := sender.User
+	session := getSession(phone)
+	log.Printf("Handling message for phone %s, current step %s, text: %q", phone, session.Step, text)
+
+	reply := process(phone, session, text, sender)
+	saveSession(phone, session)
+	SendText(sender, reply)
+}

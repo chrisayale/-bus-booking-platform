@@ -2,6 +2,7 @@ package handlers
 
 import (
 	"database/sql"
+	"log"
 	"net/http"
 	"time"
 
@@ -48,7 +49,7 @@ func (h *B2CHandler) Register(c *gin.Context) {
 		return
 	}
 
-		hash, err := utils.HashPassword(req.Password)
+	hash, err := utils.HashPassword(req.Password)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
 		return
@@ -102,6 +103,7 @@ func (h *B2CHandler) Register(c *gin.Context) {
 func (h *B2CHandler) Login(c *gin.Context) {
 	var req models.LoginRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
+		log.Printf("login bind error: %v", err)
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
@@ -113,15 +115,19 @@ func (h *B2CHandler) Login(c *gin.Context) {
 			c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 			return
 		}
+		// Log the error for debugging
+		log.Printf("login DB error: %v", err)
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "login failed"})
 		return
 	}
 
-		if !utils.CheckPassword(req.Password, user.PasswordHash) {
+	log.Printf("login user found: %s", user.Email)
+
+	if !utils.CheckPassword(req.Password, user.PasswordHash) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-		if user.Role == "owner" && user.ApprovalStatus == "pending" {
+	if user.Role == "owner" && user.ApprovalStatus == "pending" {
 		c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending approval"})
 		return
 	}
@@ -193,7 +199,7 @@ func (h *B2CHandler) SearchTrips(c *gin.Context) {
 		return
 	}
 
-		var journeys []models.Journey
+	var journeys []models.Journey
 	err := h.DB.Select(&journeys, `
 		SELECT j.id, j.organization_id, j.route_id, j.bus_id,
 			j.departure_date::text, j.departure_time::text,
@@ -222,7 +228,7 @@ func (h *B2CHandler) SearchTrips(c *gin.Context) {
 			journeys[i].Route = &route
 		}
 
-				var bus models.Bus
+		var bus models.Bus
 		if err := h.DB.Get(&bus, `SELECT * FROM buses WHERE id=$1`, journeys[i].BusID); err == nil {
 			journeys[i].Bus = &bus
 		}
@@ -514,8 +520,8 @@ func (h *B2CHandler) GetUserBookings(c *gin.Context) {
 			WHERE t.booking_id=$1`, bookings[i].ID)
 
 		// Enrich tickets with journey & route data (1 query for the booking's journey)
-				if len(tickets) > 0 {
-						var journey models.Journey
+		if len(tickets) > 0 {
+			var journey models.Journey
 			if err := h.DB.Get(&journey, `
 				SELECT id, organization_id, route_id, bus_id,
 					departure_date::text, departure_time::text,
@@ -564,8 +570,8 @@ func (h *B2CHandler) DownloadTicket(c *gin.Context) {
 	h.DB.Exec(`UPDATE tickets SET download_token=NULL, download_token_expires_at=NULL, updated_at=NOW() WHERE id=$1`, ticket.ID)
 
 	c.JSON(http.StatusOK, gin.H{
-		"ticket":    ticket,
-		"qr_token":  ticket.QRToken,
+		"ticket":     ticket,
+		"qr_token":   ticket.QRToken,
 		"journey_id": ticket.JourneyID,
 	})
 }

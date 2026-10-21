@@ -1,0 +1,227 @@
+
+	case StepPassengerCheckType:
+		return "📋 Comment souhaitez-vous vérifier votre billet ?\n\n1️⃣ Par code ou référence de billet\n2️⃣ Par image de QR Code\n\nRépondez avec le numéro de votre choix."
+
+	case StepCheckCodeInput:
+		return "🎫 Entrez la référence de votre billet (ex: CASH-...) :"
+
+	case StepCheckQRInput:
+		return "📎 Veuillez envoyer une image du QR code à vérifier :"
+
+	default:
+		return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
+	}
+	return ""
+}
+
+// Helper functions - must be at package level in Go
+func extractText(evt *events.Message) string {
+	msg := evt.Message
+	if msg.GetConversation() != "" {
+		return strings.TrimSpace(msg.GetConversation())
+	}
+	if msg.GetExtendedTextMessage() != nil {
+		return strings.TrimSpace(msg.GetExtendedTextMessage().GetText())
+	}
+	return ""
+}
+
+func SendText(to types.JID, text string) {
+	log.Printf("[INFO] Sending WhatsApp message to %s: %s", to, text)
+	msg := buildTextMessage(text)
+	if _, err := Client.SendMessage(context.Background(), to, msg); err != nil {
+		log.Printf("[ERROR] Failed to send WhatsApp message to %s: %v", to, err)
+	}
+}
+
+func getActiveAgencies() ([]Agency, error) {
+	var agencies []Agency
+	err := DB.Select(&agencies, `SELECT o.id, o.name FROM organizations o WHERE o.is_active = true AND EXISTS (SELECT 1 FROM journeys j WHERE j.organization_id = o.id AND j.departure_date >= CURRENT_DATE AND j.status NOT IN ('cancelled', 'completed')) ORDER BY RANDOM()`)
+	if err != nil {
+		return nil, err
+	}
+	return agencies, nil
+}
+
+func assignSeats(passengers []PassengerDraft, bookedSeats []string) {
+	taken := map[string]bool{}
+	for _, s := range bookedSeats {
+		taken[s] = true
+	}
+	seatNum := 1
+	for i := range passengers {
+		for {
+			candidate := fmt.Sprintf("%d", seatNum)
+			if !taken[candidate] {
+				passengers[i].SeatNumber = candidate
+				taken[candidate] = true
+				seatNum++
+				break
+			}
+			seatNum++
+		}
+	}
+}
+
+func buildTextMessage(text string) *waE2E.Message {
+	return &waE2E.Message{
+		Conversation: proto.String(text),
+	}
+}
+
+func sendTicketCard(to types.JID, ref string, j JourneyResult, t CreatedTicket) {
+	imgBytes, err := renderTicketCard(
+		j.AgencyName, ref, j.Origin, j.Destination, j.Date, j.Time, j.ArrivalTime,
+		t.PassengerName, t.PassengerPhone, t.SeatNumber, t.Price, "Active",
+		j.BusRegistration, j.AgencyPhone, t.QRToken,
+	)
+	if err != nil {
+		sendTicketImage(to, t)
+		return
+	}
+
+	uploaded, err := Client.Upload(context.Background(), imgBytes, whatsmeow.MediaImage)
+	if err != nil {
+		return
+	}
+
+	caption := fmt.Sprintf("🎫 Billet PDF : %s", t.DownloadURL)
+
+	imgMsg := &waE2E.ImageMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String("image/png"),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uploaded.FileLength),
+		Caption:       proto.String(caption),
+	}
+
+	Client.SendMessage(context.Background(), to, &waE2E.Message{ImageMessage: imgMsg})
+}
+
+func sendTicketImage(to types.JID, t CreatedTicket) {
+	qrPNG, err := qrcode.Encode(t.QRToken, qrcode.Medium, 400)
+	if err != nil {
+		return
+	}
+
+	uploaded, err := Client.Upload(context.Background(), qrPNG, whatsmeow.MediaImage)
+	if err != nil {
+		return
+	}
+
+	caption := fmt.Sprintf("🎫 %s — Siège %s — %.0f USD\nBillet PDF : %s\nMontrez ce QR code à l'embarquement.",
+		t.PassengerName, t.SeatNumber, t.Price, t.DownloadURL)
+
+	imgMsg := &waE2E.ImageMessage{
+		URL:           proto.String(uploaded.URL),
+		DirectPath:    proto.String(uploaded.DirectPath),
+		MediaKey:      uploaded.MediaKey,
+		Mimetype:      proto.String("image/png"),
+		FileEncSHA256: uploaded.FileEncSHA256,
+		FileSHA256:    uploaded.FileSHA256,
+		FileLength:    proto.Uint64(uploaded.FileLength),
+		Caption:       proto.String(caption),
+	}
+
+	Client.SendMessage(context.Background(), to, &waE2E.Message{ImageMessage: imgMsg})
+}
+
+// Additional helper functions
+var digitEmojis = []string{"0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"}
+
+func numberEmoji(n int) string {
+	if n == 10 {
+		return "🔟"
+	}
+	if n >= 0 && n < 10 {
+		return digitEmojis[n]
+	}
+	var b strings.Builder
+	for _, c := range strconv.Itoa(n) {
+		b.WriteString(digitEmojis[c-'0'])
+	}
+	return b.String()
+}
+
+func formatResults(results []JourneyResult) string {
+	var b strings.Builder
+	b.WriteString("🚌 Liste des voyages disponibles :\n\n")
+	for i, r := range results {
+		departDateFormatted := formatDate(r.Date)
+		arriveDateFormatted := formatDate(r.ArrivalDate)
+		departTimeFormatted := formatTime(r.Time)
+		arriveTimeFormatted := formatTime(r.ArrivalTime)
+		duration := calculateDuration(r.Time, r.ArrivalTime)
+		priceCDF := r.Price * 2850
+
+		b.WriteString(fmt.Sprintf("%s %s → %s\n• Agence : %s\n• 🚀 Départ : %s à %s\n• 🏁 Arrivée : %s à %s\n• ⏱️ Durée estimée : %s\n• 💰 Prix : %.0f USD / %.0f CDF\n\n",
+			numberEmoji(i+1), r.Origin, r.Destination, r.AgencyName,
+			departDateFormatted, departTimeFormatted,
+			arriveDateFormatted, arriveTimeFormatted,
+			duration,
+			r.Price, priceCDF))
+	}
+	b.WriteString("Tapez le numéro du voyage choisi.")
+	return b.String()
+}
+
+func buildConfirmSummary(s *Session) string {
+	var b strings.Builder
+	b.WriteString("Récapitulatif :\n")
+	for _, p := range s.Passengers {
+		b.WriteString(fmt.Sprintf("- %s (%s)\n", p.Name, valueOr(p.Phone, "sans téléphone")))
+	}
+	baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
+	totalAmountUSD := baseAmountUSD
+	totalAmountCDF := baseAmountUSD * 2850
+	b.WriteString(fmt.Sprintf("\nMontant total à payer : %.2f USD / %.2f CDF\n\n", totalAmountUSD, totalAmountCDF))
+	b.WriteString("\nConfirmez-vous la réservation ? (oui/non)")
+	return b.String()
+}
+
+func valueOr(v, fallback string) string {
+	if v == "" {
+		return fallback
+	}
+	return v
+}
+
+func parseDate(input string) string {
+	input = strings.TrimSpace(input)
+	lower := strings.ToLower(input)
+
+	for _, sep := range []string{"/", "-", "."} {
+		if strings.Contains(input, sep) {
+			parts := strings.Split(input, sep)
+			if len(parts) == 3 {
+				day, err1 := strconv.Atoi(strings.TrimSpace(parts[0]))
+				month, err2 := strconv.Atoi(strings.TrimSpace(parts[1]))
+				year, err3 := strconv.Atoi(strings.TrimSpace(parts[2]))
+				if err1 == nil && err2 == nil && err3 == nil && day >= 1 && day <= 31 && month >= 1 && month <= 12 && year >= 2020 {
+					return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+				}
+			}
+		}
+	}
+
+	fields := strings.Fields(lower)
+	if len(fields) == 3 {
+		day, err1 := strconv.Atoi(fields[0])
+		month, ok := frenchMonths[fields[1]]
+		year, err2 := strconv.Atoi(fields[2])
+		if err1 == nil && ok && err2 == nil && day >= 1 && day <= 31 && year >= 2020 {
+			return fmt.Sprintf("%04d-%02d-%02d", year, month, day)
+		}
+	}
+
+	return ""
+}
+
+var frenchMonths = map[string]int{
+	"janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
+	"mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
+	"septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}

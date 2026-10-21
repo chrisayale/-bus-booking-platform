@@ -46,6 +46,7 @@ export default function Layout() {
                   {isPlatformAdmin ? (
                     <div className="flex items-center gap-1">
                       <NavLink to="/platform/pending-owners" icon={Shield} label="Demandes agences" active={isActive("/platform/pending-owners")} />
+                      <NavLink to="/platform/agents" icon={Users} label="Agents" active={isActive("/platform/agents")} />
                     </div>
                   ) : isOwner ? (
                     <div className="flex items-center gap-1">

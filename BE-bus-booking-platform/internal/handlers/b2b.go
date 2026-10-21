@@ -3,9 +3,9 @@ package handlers
 import (
 	"bytes"
 	"context"
-	"fmt"
 	"database/sql"
 	"encoding/json"
+	"fmt"
 	"io"
 	"net/http"
 	"path/filepath"
@@ -21,7 +21,6 @@ import (
 	waTypes "go.mau.fi/whatsmeow/types"
 	"google.golang.org/protobuf/proto"
 )
-
 
 type B2BHandler struct {
 	DB            *sqlx.DB
@@ -312,8 +311,20 @@ func (h *B2BHandler) ListJourneys(c *gin.Context) {
 }
 
 func (h *B2BHandler) UpdateJourneyStatus(c *gin.Context) {
+	userID := c.GetString("user_id")
 	id := c.Param("id")
 	orgID := c.GetString("org_id")
+
+	// Verify user belongs to this organization
+	var memberCount int
+	if err := h.DB.Get(&memberCount, `SELECT COUNT(*) FROM user_organizations WHERE user_id = $1 AND organization_id = $2`, userID, orgID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})
+		return
+	}
+	if memberCount == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied: user is not a member of this organization"})
+		return
+	}
 
 	var req struct {
 		Status string `json:"status" binding:"required,oneof=scheduled boarding departed completed cancelled"`
@@ -508,16 +519,16 @@ func (h *B2BHandler) ListAgencies(c *gin.Context) {
 // ListPendingAgencies returns all pending agency requests awaiting approval
 func (h *B2BHandler) ListPendingAgencies(c *gin.Context) {
 	var pendingAgencies []struct {
-		ID            string    `db:"id" json:"id"`
-		AgencyName    string    `db:"agency_name" json:"agency_name"`
-		ManagerName   string    `db:"manager_name" json:"manager_name"`
-		Address       string    `db:"address" json:"address"`
-		ContactPhone  string    `db:"contact_phone" json:"contact_phone"`
-		Email         string    `db:"email" json:"email"`
-		DefaultPassword string  `db:"default_password" json:"default_password"`
-		Status        string    `db:"status" json:"status"`
-		CreatedAt     time.Time `db:"created_at" json:"created_at"`
-		UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
+		ID              string    `db:"id" json:"id"`
+		AgencyName      string    `db:"agency_name" json:"agency_name"`
+		ManagerName     string    `db:"manager_name" json:"manager_name"`
+		Address         string    `db:"address" json:"address"`
+		ContactPhone    string    `db:"contact_phone" json:"contact_phone"`
+		Email           string    `db:"email" json:"email"`
+		DefaultPassword string    `db:"default_password" json:"default_password"`
+		Status          string    `db:"status" json:"status"`
+		CreatedAt       time.Time `db:"created_at" json:"created_at"`
+		UpdatedAt       time.Time `db:"updated_at" json:"updated_at"`
 	}
 	err := h.DB.Select(&pendingAgencies, `SELECT id, agency_name, manager_name, address, contact_phone, email, default_password, status, created_at, updated_at FROM pending_agencies WHERE status = 'pending' ORDER BY created_at DESC`)
 	if err != nil {
@@ -541,14 +552,14 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 
 	// Get the pending agency
 	var pendingAgency struct {
-		ID            string    `db:"id"`
-		AgencyName    string    `db:"agency_name"`
-		ManagerName   string    `db:"manager_name"`
-		Address       string    `db:"address"`
-		ContactPhone  string    `db:"contact_phone"`
-		Email         string    `db:"email"`
-		DefaultPassword string  `db:"default_password"`
-		Status        string    `db:"status"`
+		ID              string `db:"id"`
+		AgencyName      string `db:"agency_name"`
+		ManagerName     string `db:"manager_name"`
+		Address         string `db:"address"`
+		ContactPhone    string `db:"contact_phone"`
+		Email           string `db:"email"`
+		DefaultPassword string `db:"default_password"`
+		Status          string `db:"status"`
 	}
 
 	err = tx.Get(&pendingAgency, `SELECT id, agency_name, manager_name, address, contact_phone, email, default_password, status FROM pending_agencies WHERE id = $1`, id)
@@ -602,7 +613,7 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		pendingAgency.ContactPhone,
 		"owner",
 		organization.ID,
-		true, // is_verified
+		true,       // is_verified
 		"approved", // approval_status
 	).StructScan(&user)
 	if err != nil {
@@ -643,9 +654,9 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 	}()
 
 	c.JSON(http.StatusOK, gin.H{
-		"message": "agency approved successfully",
+		"message":      "agency approved successfully",
 		"organization": organization,
-		"user": user,
+		"user":         user,
 	})
 }
 
@@ -687,28 +698,40 @@ func (h *B2BHandler) SetAgencyActive(c *gin.Context) {
 }
 
 type TicketWithDetails struct {
-	TicketID         string  `db:"ticket_id" json:"ticket_id"`
-	PassengerName    string  `db:"passenger_name" json:"passenger_name"`
-	PassengerPhone   *string `db:"passenger_phone" json:"passenger_phone,omitempty"`
-	SeatNumber       string  `db:"seat_number" json:"seat_number"`
-	Price            float64 `db:"price" json:"price"`
-	TicketStatus     string  `db:"ticket_status" json:"ticket_status"`
-	JourneyID        string  `db:"journey_id" json:"journey_id"`
-	DepartureDate    string  `db:"departure_date" json:"departure_date"`
-	DepartureTime    string  `db:"departure_time" json:"departure_time"`
-	BusID            string  `db:"bus_id" json:"bus_id"`
-	RegistrationNumber string `db:"registration_number" json:"registration_number"`
-	Origin           string  `db:"origin" json:"origin"`
-	Destination      string  `db:"destination" json:"destination"`
-	BookingReference string  `db:"booking_reference" json:"booking_reference"`
-	BookingStatus    string  `db:"booking_status" json:"booking_status"`
-	BookedAt         string  `db:"booked_at" json:"booked_at"`
+	TicketID           string  `db:"ticket_id" json:"ticket_id"`
+	PassengerName      string  `db:"passenger_name" json:"passenger_name"`
+	PassengerPhone     *string `db:"passenger_phone" json:"passenger_phone,omitempty"`
+	SeatNumber         string  `db:"seat_number" json:"seat_number"`
+	Price              float64 `db:"price" json:"price"`
+	TicketStatus       string  `db:"ticket_status" json:"ticket_status"`
+	JourneyID          string  `db:"journey_id" json:"journey_id"`
+	DepartureDate      string  `db:"departure_date" json:"departure_date"`
+	DepartureTime      string  `db:"departure_time" json:"departure_time"`
+	BusID              string  `db:"bus_id" json:"bus_id"`
+	RegistrationNumber string  `db:"registration_number" json:"registration_number"`
+	Origin             string  `db:"origin" json:"origin"`
+	Destination        string  `db:"destination" json:"destination"`
+	BookingReference   string  `db:"booking_reference" json:"booking_reference"`
+	BookingStatus      string  `db:"booking_status" json:"booking_status"`
+	BookedAt           string  `db:"booked_at" json:"booked_at"`
 }
 
 func (h *B2BHandler) ListOrganizationTickets(c *gin.Context) {
+	userID := c.GetString("user_id")
 	orgID := c.GetString("org_id")
 	busID := c.Query("bus_id")
 	journeyID := c.Query("journey_id")
+
+	// Verify user belongs to this organization
+	var memberCount int
+	if err := h.DB.Get(&memberCount, `SELECT COUNT(*) FROM user_organizations WHERE user_id = $1 AND organization_id = $2`, userID, orgID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})
+		return
+	}
+	if memberCount == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied: user is not a member of this organization"})
+		return
+	}
 
 	query := `
 		SELECT t.id AS ticket_id, t.passenger_name, t.passenger_phone, t.seat_number, t.price,
@@ -772,7 +795,6 @@ func (h *B2BHandler) ImpersonateOwner(c *gin.Context) {
 	})
 }
 
-
 func (h *B2BHandler) DeleteAdminUser(c *gin.Context) {
 	userID := c.Param("id")
 	orgID := c.GetString("org_id")
@@ -820,6 +842,7 @@ func (h *B2BHandler) DeleteAdminUser(c *gin.Context) {
 // ======================== QR SCANNER ========================
 
 func (h *B2BHandler) ScanTicket(c *gin.Context) {
+	userID := c.GetString("user_id")
 	var req models.QRScanRequest
 	if err := c.ShouldBindJSON(&req); err != nil {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
@@ -827,6 +850,17 @@ func (h *B2BHandler) ScanTicket(c *gin.Context) {
 	}
 
 	orgID := c.GetString("org_id")
+
+	// Verify user belongs to this organization
+	var memberCount int
+	if err := h.DB.Get(&memberCount, `SELECT COUNT(*) FROM user_organizations WHERE user_id = $1 AND organization_id = $2`, userID, orgID); err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to verify organization membership"})
+		return
+	}
+	if memberCount == 0 {
+		c.JSON(http.StatusForbidden, gin.H{"error": "access denied: user is not a member of this organization"})
+		return
+	}
 
 	// Validate QR token
 	var ticket models.Ticket
@@ -870,9 +904,9 @@ func (h *B2BHandler) ScanTicket(c *gin.Context) {
 	// Check if journey already departed (support both "HH:MM:SS" and "HH:MM" formats)
 	departureTimeStr := journey.DepartureDate + "T" + journey.DepartureTime
 	// Try with the time as-is first (handles HH:MM:SS from PG), then append :00 (handles HH:MM from HTML input)
-	departureTime, err := time.Parse(time.RFC3339, departureTimeStr + "Z")
+	departureTime, err := time.Parse(time.RFC3339, departureTimeStr+"Z")
 	if err != nil {
-		departureTime, err = time.Parse(time.RFC3339, departureTimeStr + ":00Z")
+		departureTime, err = time.Parse(time.RFC3339, departureTimeStr+":00Z")
 	}
 	if err == nil && time.Now().After(departureTime.Add(30*time.Minute)) {
 		// More than 30 min after departure? Too late
@@ -890,9 +924,9 @@ func (h *B2BHandler) ScanTicket(c *gin.Context) {
 	}
 
 	c.JSON(http.StatusOK, gin.H{
-		"message":    "check-in successful",
-		"passenger":  ticket.PassengerName,
-		"seat":       ticket.SeatNumber,
-		"status":     "checked_in",
+		"message":   "check-in successful",
+		"passenger": ticket.PassengerName,
+		"seat":      ticket.SeatNumber,
+		"status":    "checked_in",
 	})
 }

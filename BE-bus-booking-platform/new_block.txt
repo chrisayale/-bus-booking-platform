@@ -1,0 +1,13 @@
+case StepCheckMenu:
+	switch text {
+	case "1":
+		s.PreviousStep = s.Step
+		s.Step = StepPassengerCheckType
+		return getPromptForStep(s)
+	case "2":
+		s.PreviousStep = s.Step
+		s.Step = StepAgentPinInput
+		return getPromptForStep(s)
+	default:
+		return "🔍 Espace Vérification & Guichet :\n\n1️⃣ Voir l'état d'avancement\n2️⃣ Guichet (Réservé aux agents 🧑‍💼)\n\nRépondez avec le numéro de votre choix."
+	}

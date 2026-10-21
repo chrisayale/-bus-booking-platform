@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"database/sql"
 	"fmt"
 	"log"
 	"strconv"
@@ -25,7 +26,8 @@ const welcomeMenu = `Bienvenue sur GUV (Guichet unique des voyages) 🚌
 1️⃣ Recherche directe de voyages
 2️⃣ Recherche par agence
 3️⃣ Créer une agence
-4️⃣ Aide & Assistance
+4️⃣ Vérification / Guichet
+5️⃣ Aide & Assistance
 
 Répondez avec le numéro de votre choix.`
 
@@ -48,6 +50,80 @@ func GetRealPhoneNumber(client *whatsmeow.Client, jid types.JID) string {
 		}
 	}
 	return jid.User
+}
+
+// BookingDetailsResult holds the result of the booking lookup query for controller payment validation
+type BookingDetailsResult struct {
+	ID                 string    `db:"id"`
+	BookingReference   string    `db:"booking_reference"`
+	TotalAmount        float64   `db:"total_amount"`
+	Status             string    `db:"status"`
+	CreatedAt          time.Time `db:"created_at"`
+	UpdatedAt          time.Time `db:"updated_at"`
+	JourneyID          string    `db:"journey_id"`
+	DepartureDate      string    `db:"departure_date"`
+	DepartureTime      string    `db:"departure_time"`
+	ArrivalDate        string    `db:"arrival_date"`
+	ArrivalTime        string    `db:"arrival_time"`
+	RouteID            string    `db:"route_id"`
+	Origin             string    `db:"origin"`
+	Destination        string    `db:"destination"`
+	BasePrice          float64   `db:"base_price"`
+	OrganizationID     string    `db:"organization_id"`
+	OrganizationName   string    `db:"organization_name"`
+	TicketIDs          string    `db:"ticket_ids"`
+	PassengerNames     string    `db:"passenger_names"`
+	FirstPassengerName string    `db:"first_passenger_name"`
+	PassengerPhones    string    `db:"passenger_phones"`
+	SeatNumbers        string    `db:"seat_numbers"`
+}
+
+type controllerPINResult struct {
+	UserID    string `db:"user_id"`
+	AgentName string `db:"agent_name"`
+	AgencyName string `db:"agency_name"`
+}
+
+func verifyControllerPIN(phone string, pin string) *controllerPINResult {
+	var res controllerPINResult
+	err := DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+	`, pin)
+	if err != nil {
+		return nil
+	}
+	return &res
+}
+
+func formatTicketDetail(ticket *CreatedTicket) string {
+	var b strings.Builder
+	b.WriteString("🎫 *Détails du billet* :\n")
+	b.WriteString(fmt.Sprintf("📌 *Référence* : %s\n", valueOr(ticket.BookingReference, "N/A")))
+	b.WriteString(fmt.Sprintf("👤 *Passager* : %s\n", valueOr(ticket.PassengerName, "N/A")))
+	b.WriteString(fmt.Sprintf("📱 *Téléphone* : %s\n", valueOr(ticket.PassengerPhone, "N/A")))
+	b.WriteString(fmt.Sprintf("🏢 *Agence* : %s\n", valueOr(ticket.AgencyName, "N/A")))
+	b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", valueOr(ticket.DepartureCity, "N/A"), valueOr(ticket.ArrivalCity, "N/A")))
+	b.WriteString(fmt.Sprintf("📅 *Départ* : %s\n", valueOr(formatDateTime(ticket.Date, ticket.DepartureTime), "N/A")))
+	b.WriteString(fmt.Sprintf("🏁 *Arrivée* : %s\n", valueOr(formatDateTime(ticket.ArrivalDate, ticket.ArrivalTime), "N/A")))
+	b.WriteString(fmt.Sprintf("💺 *Siège* : N° %s\n", valueOr(ticket.SeatNumber, "N/A")))
+	b.WriteString(fmt.Sprintf("💰 *Prix* : %.2f USD\n", ticket.Price))
+	b.WriteString(fmt.Sprintf("💳 *Paiement* : Espèces\n"))
+	b.WriteString(fmt.Sprintf("📊 *Statut* : %s\n", valueOr(ticket.Status, "N/A")))
+	b.WriteString("\n")
+	b.WriteString("📄 *Télécharger le billet PDF* :\n")
+	if ticket.DownloadToken != "" {
+		b.WriteString(fmt.Sprintf("https://%s/tickets/download/%s\n", AppURL, ticket.DownloadToken))
+	} else {
+		b.WriteString("Non disponible\n")
+	}
+	b.WriteString("\nTapez *menu* pour revenir au menu principal.")
+	return b.String()
 }
 
 // getPromptForStep returns the appropriate prompt for the current step of the session.
@@ -174,6 +250,30 @@ func getPromptForStep(s *Session) string {
 		return fmt.Sprintf("✅ Veuillez confirmer les informations de l'agence :\n\nNom de l'agence : %s\nResponsable : %s\nAdresse : %s\nTéléphone : %s\n\nRépondez par 'oui' pour confirmer ou 'menu' pour annuler.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
 	case StepPasswordChangeMenu:
 		return "🔑 Voulez-vous changer votre mot de passe ?\n\n1️⃣ Oui\n2️⃣ Non\n\nRépondez avec le numéro de votre choix."
+	case StepVerificationMenu:
+		return "🎫 *Vérification / Guichet*\n\n1️⃣ Voir mes billets\n2️⃣ Guichet Contrôleur\n3️⃣ Retour au menu principal\n\nRépondez avec le numéro de votre choix."
+	case StepViewTickets:
+		return "Sélectionnez un billet pour voir les détails :"
+	case StepSelectTicketDetails:
+		return "" // Dynamic prompt handled in process()
+	case StepControllerInput:
+		return "🔐 Veuillez saisir votre code PIN agent :"
+	case StepControllerActions:
+		return "" // Dynamic prompt handled in process()
+	case StepControllerPaymentReferenceInput:
+		return "💳 *Validation de Paiement*\n\nVeuillez saisir le numéro de réservation (Booking Reference) ou le numéro de téléphone du passager :"
+	case StepControllerPaymentMethod:
+		return "💳 *Validation de Paiement*\n\nComment souhaitez-vous rechercher la réservation ?\n\n1️⃣ Par référence de réservation (ex: REF12345)\n2️⃣ Par numéro de téléphone du passager\n3️⃣ Par image / photo du QR Code\n\n0️⃣ Retour au menu contrôleur\n\nRépondez avec le numéro de votre choix."
+	case StepControllerInputBookingRef:
+		return "✍️ Veuillez saisir la **référence de la réservation** :"
+	case StepControllerInputPhone:
+		return "📱 Veuillez saisir le **numéro de téléphone du passager** :"
+	case StepControllerInputQRCode:
+		return "📸 Veuillez **envoyer la photo / l'image du QR code** du billet :"
+	case StepControllerCheckInConfirm:
+		return "" // Dynamic prompt handled in process()
+	case StepControllerCheckInProcess:
+		return "" // Dynamic prompt handled in process()
 	default:
 		return "❓ Étape inconnue. Tapez *menu* pour revenir au menu principal."
 	}
@@ -208,6 +308,18 @@ func formatTime(timeStr string) string {
 		minute = "0" + minute
 	}
 	return fmt.Sprintf("%sh%s", hour, minute)
+}
+
+func formatDateTime(dateStr, timeStr string) string {
+	if dateStr == "" {
+		return timeStr
+	}
+	formattedDate := formatDate(dateStr)
+	if timeStr == "" {
+		return formattedDate
+	}
+	formattedTime := formatTime(timeStr)
+	return fmt.Sprintf("%s à %s", formattedDate, formattedTime)
 }
 
 func calculateDuration(startTimeStr, endTimeStr string) string {
@@ -376,6 +488,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			s.Step = StepAgencyName
 			return getPromptForStep(s)
 		case "4":
+			// Vérification / Guichet
+			s.PreviousStep = s.Step
+			s.Step = StepVerificationMenu
+			return getPromptForStep(s)
+		case "5":
 			// Aide & Assistance
 			return "📞 Pour toute assistance ou information, notre service client est à votre disposition :\n- Ligne directe & WhatsApp : +243974645174\n- Email : ayaletrans@gmail.com"
 		default:
@@ -1060,10 +1177,553 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		s.Step = StepSeatsCount
 		return getPromptForStep(s)
 
+	case StepVerificationMenu:
+		switch text {
+		case "1":
+			// Show my tickets
+			// Use the sender's WhatsApp phone number (s.UserPhone is already set from the sender JID)
+			phone := s.UserPhone
+			// Clean phone number for display (remove leading + if present)
+			displayPhone := strings.TrimPrefix(phone, "+")
+
+			tickets, err := GetTicketsByPhone(phone)
+			if err != nil {
+				log.Printf("[ERROR-SQL-TICKETS] %v", err)
+				return "Erreur lors de la récupération des billets. Tapez *menu* pour réessayer."
+			}
+			if len(tickets) == 0 {
+				return fmt.Sprintf("❌ *Aucun billet trouvé pour le numéro* +%s.\n\nTapez *menu* pour revenir au menu principal.", displayPhone)
+			}
+
+			// Build the ticket list message
+			var b strings.Builder
+			b.WriteString("🎫 *Vos Billets de Voyage :*\n\n")
+			for i, ticket := range tickets {
+				b.WriteString(fmt.Sprintf("%s Billet %d\n", numberEmoji(i+1), i+1))
+				b.WriteString(fmt.Sprintf("   👤 Passager : %s\n", ticket.PassengerName))
+				b.WriteString(fmt.Sprintf("   💺 Siège     : %s\n", ticket.SeatNumber))
+				b.WriteString(fmt.Sprintf("   💰 Prix      : %.2f USD\n", ticket.Price))
+				if ticket.DownloadToken != "" {
+					b.WriteString(fmt.Sprintf("   📥 Télécharger : %s/tickets/download/%s\n", AppURL, ticket.DownloadToken))
+				}
+				b.WriteString("\n")
+			}
+			b.WriteString("Tapez le numéro du billet pour voir les détails ou tapez *menu* pour revenir.")
+
+			// Store ticket IDs in session Data for later retrieval
+			var ticketIDs []string
+			for _, ticket := range tickets {
+				ticketIDs = append(ticketIDs, ticket.ID)
+			}
+			s.Data["ticket_ids"] = ticketIDs
+			s.PreviousStep = s.Step
+			s.Step = StepSelectTicketDetails
+			return b.String()
+		case "2":
+			// Controller menu
+			s.PreviousStep = s.Step
+			s.Step = StepControllerInput
+			return getPromptForStep(s)
+		case "3":
+			// Return to main menu
+			s.Step = StepMenu
+			return welcomeMenu
+		default:
+			return "Choix invalide. Veuillez sélectionner 1 pour voir vos billets, 2 pour le guichet contrôleur ou 3 pour retourner au menu principal."
+		}
+
+	case StepSelectTicketDetails:
+		// Handle ticket selection for QR code display
+		// Retrieve ticket IDs from session Data
+		ticketIDsAny := s.Data["ticket_ids"]
+		if ticketIDsAny == nil {
+			return "Aucun billet trouvé. Veuillez d'abord sélectionner l'option 1 pour voir vos billets, puis revenir ici. Tapez *menu* pour retourner au menu principal."
+		}
+		ticketIDs, ok := ticketIDsAny.([]string)
+		if !ok || ticketIDs == nil {
+			return "Erreur de récupération des billets. Veuillez réessayer en sélectionnant l'option 1 à nouveau. Tapez *menu* pour retourner au menu principal."
+		}
+
+		// Validate ticket number input
+		ticketNum, err := strconv.Atoi(text)
+		if err != nil || ticketNum < 1 || ticketNum > len(ticketIDs) {
+			return fmt.Sprintf("Numéro de billet invalide. Veuillez entrer un numéro entre 1 et %d, ou tapez *menu* pour retourner au menu principal.", len(ticketIDs))
+		}
+
+		// Get selected ticket ID from our stored list
+		selectedTicketID := ticketIDs[ticketNum-1]
+
+		// Get ticket details using the stored ticket ID
+		ticket, err := GetTicketDetailsByID(selectedTicketID)
+		if err != nil {
+			return fmt.Sprintf("Erreur lors de la récupération des détails du billet : %v. Tapez *menu* pour retourner au menu principal.", err)
+		}
+
+		// Format and return ticket details with QR code
+		return formatTicketDetail(ticket)
+
+	case StepViewTickets:
+		// Legacy handler - redirect to new flow
+		ticketIDsAny := s.Data["ticket_ids"]
+		if ticketIDsAny == nil {
+			return "Aucun billet trouvé. Veuillez d'abord sélectionner l'option 1 pour voir vos billets, puis revenir ici. Tapez *menu* pour retourner au menu principal."
+		}
+		ticketIDs, ok := ticketIDsAny.([]string)
+		if !ok || ticketIDs == nil {
+			return "Erreur de récupération des billets. Veuillez réessayer en sélectionnant l'option 1 à nouveau. Tapez *menu* pour retourner au menu principal."
+		}
+
+		// Validate ticket number input
+		ticketNum, err := strconv.Atoi(text)
+		if err != nil || ticketNum < 1 || ticketNum > len(ticketIDs) {
+			return fmt.Sprintf("Numéro de billet invalide. Veuillez entrer un numéro entre 1 et %d, ou tapez *menu* pour retourner au menu principal.", len(ticketIDs))
+		}
+
+		// Get selected ticket ID from our stored list
+		selectedTicketID := ticketIDs[ticketNum-1]
+
+		// Get ticket details using the stored ticket ID
+		ticket, err := GetTicketDetailsByID(selectedTicketID)
+		if err != nil {
+			return fmt.Sprintf("Erreur lors de la récupération des détails du billet : %v. Tapez *menu* pour retourner au menu principal.", err)
+		}
+
+		// Format and return ticket details
+		return formatTicketDetail(ticket)
+
+	// Controller payment validation steps
+	case StepControllerInput:
+		// Handle controller PIN input
+		if strings.TrimSpace(text) == "" {
+			return "Veuillez saisir votre code PIN agent :"
+		}
+
+		// Format phone number for consistency (ensure it starts with country code without +)
+		var formattedPhone string
+		phoneInput := strings.TrimSpace(s.UserPhone)
+		if strings.HasPrefix(phoneInput, "+") {
+			formattedPhone = phoneInput[1:] // Remove leading +
+		} else {
+			formattedPhone = phoneInput
+		}
+
+		// Verify the PIN against the user's phone number
+		result := verifyControllerPIN(formattedPhone, strings.TrimSpace(text))
+		if result == nil {
+			log.Printf("Authentification agent échouée pour le numéro %s et le PIN %s", formattedPhone, strings.TrimSpace(text))
+			return "❌ Code PIN incorrect ou numéro non autorisé. Tapez *menu* pour recommencer."
+		}
+
+		// PIN is valid, set controller authentication fields
+		s.IsControllerAuthenticated = true
+		s.AgentName = result.AgentName
+		s.AssignedAgencies = []Agency{{Name: result.AgencyName}}
+
+		// Move to controller menu
+		s.PreviousStep = s.Step
+		s.Step = StepControllerActions
+
+		// Build controller menu message
+		var menu strings.Builder
+		menu.WriteString("✅ Authentification réussie !\n")
+		menu.WriteString(fmt.Sprintf("Bienvenue, %s !\n", s.AgentName))
+		menu.WriteString("👮‍♂️ *Guichet Contrôleur*\n\n")
+		menu.WriteString("🏥 Agences affectées :\n")
+		for i, agency := range s.AssignedAgencies {
+			menu.WriteString(fmt.Sprintf("   %d. %s\n", i+1, agency.Name))
+		}
+		menu.WriteString("\nSélectionnez une action :\n")
+		menu.WriteString("1️⃣ Valider le paiement\n")
+		menu.WriteString("2️⃣ Faire le check-in\n")
+
+		return menu.String()
+
+	case StepControllerActions:
+		// Handle controller menu selection
+		switch strings.TrimSpace(text) {
+		case "1", "1️⃣": // Valider le paiement
+			s.PreviousStep = s.Step
+			s.Step = StepControllerPaymentMethod
+			return getPromptForStep(s)
+		case "2", "2️⃣": // Faire le check-in
+			s.PreviousStep = s.Step
+			s.Step = StepControllerCheckInConfirm
+			return getPromptForStep(s)
+		default:
+			return "Choix invalide. Veuillez sélectionner 1 pour valider le paiement ou 2 pour faire le check-in, or tapez *menu* pour retourner au menu principal."
+		}
+
+	case StepControllerPaymentMethod:
+		// Handle payment validation method selection
+		switch strings.TrimSpace(text) {
+		case "1", "1️⃣": // Par référence de réservation
+			s.PreviousStep = s.Step
+			s.Step = StepControllerInputBookingRef
+			return getPromptForStep(s)
+		case "2", "2️⃣": // Par numéro de téléphone du passager
+			s.PreviousStep = s.Step
+			s.Step = StepControllerInputPhone
+			return getPromptForStep(s)
+		case "3", "3️⃣": // Par image / photo du QR Code
+			s.PreviousStep = s.Step
+			s.Step = StepControllerInputQRCode
+			return getPromptForStep(s)
+		case "0", "0️⃣": // Retour au menu contrôleur
+			s.PreviousStep = s.Step
+			s.Step = StepControllerActions
+			return getPromptForStep(s)
+		default:
+			return getPromptForStep(s)
+		}
+
+	case StepControllerInputBookingRef:
+		// Handle controller booking reference input
+		if strings.TrimSpace(text) == "" {
+			return "✍️ Veuillez saisir la **référence de la réservation** :"
+		}
+
+		reference := strings.TrimSpace(text)
+		var bookingResult BookingDetailsResult
+		var err error
+
+		// Try to find booking by reference
+		err = DB.Get(&bookingResult, `
+			SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+				   r.id as route_id, r.origin, r.destination, r.base_price,
+				   o.id as organization_id, o.name as organization_name,
+					   GROUP_CONCAT(t.id) = ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) = passenger_names,
+					   MIN(t.passenger_name) = first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+					   GROUP_CONCAT(t.seat_number) = seat_numbers
+			FROM bookings b
+			JOIN journeys j ON b.journey_id = j.id
+			JOIN routes r ON j.route_id = r.id
+			JOIN organizations o ON j.organization_id = o.id
+			LEFT JOIN tickets t ON b.id = t.booking_id
+			WHERE b.booking_reference = $1
+			GROUP BY b.id, j.id, r.id, o.id
+		`, reference)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return "❌ Aucune réservation trouvée pour cette référence.\n\nVeuillez vérifier le numéro de réservation et réessayer, ou tapez *0* pour retourner."
+			}
+			return fmt.Sprintf("❌ Erreur lors de la recherche de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		return processControllerBookingResult(s, bookingResult)
+
+	case StepControllerInputPhone:
+		// Handle controller passenger phone input
+		if strings.TrimSpace(text) == "" {
+			return "📱 Veuillez saisir le **numéro de téléphone du passager** :"
+		}
+
+		phoneInput := strings.TrimSpace(text)
+		// Normalize the phone number
+		normalizedPhone := strings.ReplaceAll(phoneInput, "+", "")
+		normalizedPhone = strings.ReplaceAll(normalizedPhone, " ", "")
+		normalizedPhone = strings.ReplaceAll(normalizedPhone, "-", "")
+
+		var bookingResult BookingDetailsResult
+		err := DB.Get(&bookingResult, `
+			SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+				   r.id as route_id, r.origin, r.destination, r.base_price,
+				   o.id as organization_id, o.name as organization_name,
+					   GROUP_CONCAT(t.id) = ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) = passenger_names,
+					   MIN(t.passenger_name) = first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+					   GROUP_CONCAT(t.seat_number) = seat_numbers
+			FROM bookings b
+			JOIN journeys j ON b.journey_id = j.id
+			JOIN routes r ON j.route_id = r.id
+			JOIN organizations o ON j.organization_id = o.id
+			JOIN tickets t ON b.id = t.booking_id
+			WHERE t.passenger_phone = $1
+			GROUP BY b.id, j.id, r.id, o.id
+		`, normalizedPhone)
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return "❌ Aucune réservation trouvée pour ce numéro de téléphone.\n\nVeuillez vérifier le numéro et réessayer, ou tapez *0* pour retourner."
+			}
+			return fmt.Sprintf("❌ Erreur lors de la recherche de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		return processControllerBookingResult(s, bookingResult)
+
+	case StepControllerInputQRCode:
+		// Handle controller QR code image input
+		if strings.TrimSpace(text) == "" {
+			return "📸 Veuillez **envoyer la photo / l'image du QR code** du billet :"
+		}
+
+		// For now, we'll treat text input as a potential QR token or booking reference
+		// In a full implementation, this would handle image messages
+		qrInput := strings.TrimSpace(text)
+
+		// Try to find ticket by QR token
+		var bookingResult BookingDetailsResult
+		err := DB.Get(&bookingResult, `
+			SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+				   r.id as route_id, r.origin, r.destination, r.base_price,
+				   o.id as organization_id, o.name as organization_name,
+					   GROUP_CONCAT(t.id) = ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) = passenger_names,
+					   MIN(t.passenger_name) = first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+					   GROUP_CONCAT(t.seat_number) = seat_numbers
+			FROM bookings b
+			JOIN journeys j ON b.journey_id = j.id
+			JOIN routes r ON j.route_id = r.id
+			JOIN organizations o ON j.organization_id = o.id
+			LEFT JOIN tickets t ON b.id = t.booking_id
+			WHERE t.qr_token = $1
+			GROUP BY b.id, j.id, r.id, o.id
+		`, qrInput)
+
+		if err != nil {
+			// Try as booking reference
+			err = DB.Get(&bookingResult, `
+				SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+					   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+					   r.id as route_id, r.origin, r.destination, r.base_price,
+					   o.id as organization_id, o.name as organization_name,
+						   GROUP_CONCAT(t.id) = ticket_ids,
+						   GROUP_CONCAT(t.passenger_name) = passenger_names,
+						   MIN(t.passenger_name) = first_passenger_name,
+						   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+						   GROUP_CONCAT(t.seat_number) = seat_numbers
+				FROM bookings b
+				JOIN journeys j ON b.journey_id = j.id
+				JOIN routes r ON j.route_id = r.id
+				JOIN organizations o ON j.organization_id = o.id
+				LEFT JOIN tickets t ON b.id = t.booking_id
+				WHERE b.booking_reference = $1
+				GROUP BY b.id, j.id, r.id, o.id
+			`, qrInput)
+		}
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return "❌ Aucun billet trouvé pour ce QR code / référence.\n\nVeuillez vérifier et réessayer, ou tapez *0* pour retourner."
+			}
+			return fmt.Sprintf("❌ Erreur lors de la recherche : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		return processControllerBookingResult(s, bookingResult)
+
+	case StepControllerPaymentReferenceInput:
+		// Handle controller payment reference input
+		if strings.TrimSpace(text) == "" {
+			return "Veuillez saisir le numéro de réservation (Booking Reference) ou le numéro de téléphone du passager :"
+		}
+
+		reference := strings.TrimSpace(text)
+		var bookingResult BookingDetailsResult
+		var err error
+
+		// Try to find booking by reference first
+		err = DB.Get(&bookingResult, `
+			SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+				   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+				   r.id as route_id, r.origin, r.destination, r.base_price,
+				   o.id as organization_id, o.name as organization_name,
+					   GROUP_CONCAT(t.id) = ticket_ids,
+					   GROUP_CONCAT(t.passenger_name) = passenger_names,
+					   MIN(t.passenger_name) = first_passenger_name,
+					   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+					   GROUP_CONCAT(t.seat_number) = seat_numbers
+			FROM bookings b
+			JOIN journeys j ON b.journey_id = j.id
+			JOIN routes r ON j.route_id = r.id
+			JOIN organizations o ON j.organization_id = o.id
+			LEFT JOIN tickets t ON b.id = t.booking_id
+			WHERE b.booking_reference = $1
+			GROUP BY b.id, j.id, r.id, o.id
+		`, reference)
+
+		if err != nil {
+			// If not found by reference, try to find by passenger phone
+			// First, normalize the phone number (remove +, spaces, etc.)
+			normalizedPhone := strings.ReplaceAll(reference, "+", "")
+			normalizedPhone = strings.ReplaceAll(normalizedPhone, " ", "")
+			normalizedPhone = strings.ReplaceAll(normalizedPhone, "-", "")
+
+			err = DB.Get(&bookingResult, `
+				SELECT b.id, b.booking_reference, b.total_amount, b.status, b.created_at, b.updated_at,
+					   j.id as journey_id, j.departure_date, j.departure_time, j.arrival_date, j.arrival_time,
+					   r.id as route_id, r.origin, r.destination, r.base_price,
+					   o.id as organization_id, o.name as organization_name,
+						   GROUP_CONCAT(t.id) = ticket_ids,
+						   GROUP_CONCAT(t.passenger_name) = passenger_names,
+						   MIN(t.passenger_name) = first_passenger_name,
+						   GROUP_CONCAT(t.passenger_phone) = passenger_phones,
+						   GROUP_CONCAT(t.seat_number) = seat_numbers
+			FROM bookings b
+			JOIN journeys j ON b.journey_id = j.id
+			JOIN routes r ON j.route_id = r.id
+			JOIN organizations o ON j.organization_id = o.id
+			JOIN tickets t ON b.id = t.booking_id
+			WHERE t.passenger_phone = $1
+			GROUP BY b.id, j.id, r.id, o.id
+			`, normalizedPhone)
+		}
+
+		if err != nil {
+			if err == sql.ErrNoRows {
+				return "❌ Aucune réservation en attente trouvée pour cette référence/numéro.\n\nVeuillez vérifier le numéro de réservation ou le numéro de téléphone du passager et réessayer, ou tapez *menu* pour retourner au menu principal."
+			}
+			return fmt.Sprintf("❌ Erreur lors de la recherche de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		// Check if booking is already paid/confirmed
+		if bookingResult.Status == "confirmed" || bookingResult.Status == "paid" {
+			return fmt.Sprintf("ℹ️ Cette réservation (%s) est déjà confirmée/payée.\n\nTapez *menu* pour retourner au menu principal.", bookingResult.BookingReference)
+		}
+
+		// Update booking status to confirmed
+		_, err = DB.Exec(`UPDATE bookings SET status = 'confirmed' WHERE id = $1`, bookingResult.ID)
+		if err != nil {
+			return fmt.Sprintf("❌ Erreur lors de la confirmation de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		// Get passenger name for confirmation message (first passenger)
+		var passengerName string
+		if bookingResult.PassengerNames != "" {
+			names := strings.Split(bookingResult.PassengerNames, ",")
+			if len(names) > 0 && names[0] != "" {
+				passengerName = names[0]
+			} else {
+				passengerName = "Passager"
+			}
+		} else {
+			passengerName = "Passager"
+		}
+
+		// Return to controller actions menu
+		s.PreviousStep = s.Step
+		s.Step = StepControllerActions
+
+		return fmt.Sprintf("✅ Paiement validé pour le passager %s (Réservation %s) !\n\nSélectionnez une action :\n1️⃣ Valider le paiement\n2️⃣ Faire le check-in", passengerName, bookingResult.BookingReference)
+
+	case StepControllerCheckInConfirm:
+		// Handle check-in confirmation
+		if strings.TrimSpace(text) == "1" || strings.TrimSpace(text) == "1️⃣" {
+			s.Step = StepControllerCheckInProcess
+			return getPromptForStep(s)
+		} else if strings.TrimSpace(text) == "2" || strings.TrimSpace(text) == "2️⃣" || strings.ToLower(strings.TrimSpace(text)) == "0" || strings.ToLower(strings.TrimSpace(text)) == "retour" {
+			s.PreviousStep = s.Step
+			s.Step = StepControllerActions
+			return getPromptForStep(s)
+		}
+		return getPromptForStep(s)
+
+	case StepControllerCheckInProcess:
+		// Process check-in
+		bookingID := ""
+		if s.Data != nil {
+			if id, ok := s.Data["controller_booking_id"].(string); ok {
+				bookingID = id
+			}
+		}
+
+		if bookingID == "" {
+			return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
+		}
+
+		// Update all tickets for this booking to checked_in status
+		_, err := DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1 AND status IN ('active', 'confirmed')`, bookingID)
+		if err != nil {
+			return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+
+		bookingRef := ""
+		if s.Data != nil {
+			if ref, ok := s.Data["controller_booking_ref"].(string); ok {
+				bookingRef = ref
+			}
+		}
+
+		s.PreviousStep = s.Step
+		s.Step = StepControllerActions
+
+		return fmt.Sprintf("✅ Check-in effectué pour la réservation %s !\n\nSélectionnez une action :\n1️⃣ Valider le paiement\n2️⃣ Faire le check-in", bookingRef)
+
 	default:
 		return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
 	}
 	return ""
+}
+
+// processControllerBookingResult processes a booking found by the controller
+// Handles both payment validation and check-in based on booking status
+func processControllerBookingResult(s *Session, bookingResult BookingDetailsResult) string {
+	// Check if booking is already confirmed/paid
+	if bookingResult.Status == "confirmed" || bookingResult.Status == "paid" {
+		// Booking is already paid - offer direct check-in
+		s.PreviousStep = s.Step
+		s.Step = StepControllerCheckInConfirm
+		// Store booking ID in session data for check-in
+		if s.Data == nil {
+			s.Data = make(map[string]interface{})
+		}
+		s.Data["controller_booking_id"] = bookingResult.ID
+		s.Data["controller_booking_ref"] = bookingResult.BookingReference
+
+		var passengerName string
+		if bookingResult.PassengerNames != "" {
+			names := strings.Split(bookingResult.PassengerNames, ",")
+			if len(names) > 0 && names[0] != "" {
+				passengerName = names[0]
+			} else {
+				passengerName = "Passager"
+			}
+		} else {
+			passengerName = "Passager"
+		}
+
+		// Build check-in confirmation prompt
+		var b strings.Builder
+		b.WriteString(fmt.Sprintf("ℹ️ Cette réservation (%s) est déjà confirmée/payée.\n\n", bookingResult.BookingReference))
+		b.WriteString(fmt.Sprintf("Passager : %s\n", passengerName))
+		b.WriteString(fmt.Sprintf("Trajet : %s → %s\n", bookingResult.Origin, bookingResult.Destination))
+		b.WriteString(fmt.Sprintf("Date : %s à %s\n", formatDate(bookingResult.DepartureDate), bookingResult.DepartureTime))
+		b.WriteString("\nVoulez-vous faire le check-in ?\n\n")
+		b.WriteString("1️⃣ Oui (Check-in)\n")
+		b.WriteString("2️⃣ Non (Retour)\n")
+		return b.String()
+	}
+
+	// Booking is pending - validate payment
+	_, err := DB.Exec(`UPDATE bookings SET status = 'confirmed' WHERE id = $1`, bookingResult.ID)
+	if err != nil {
+		return fmt.Sprintf("❌ Erreur lors de la confirmation de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// Get passenger name for confirmation message
+	var passengerName string
+	if bookingResult.PassengerNames != "" {
+		names := strings.Split(bookingResult.PassengerNames, ",")
+		if len(names) > 0 && names[0] != "" {
+			passengerName = names[0]
+		} else {
+			passengerName = "Passager"
+		}
+	} else {
+		passengerName = "Passager"
+	}
+
+	// Return to controller actions menu
+	s.PreviousStep = s.Step
+	s.Step = StepControllerActions
+
+	return fmt.Sprintf("✅ Paiement validé pour le passager %s (Réservation %s) !\n\nSélectionnez une action :\n1️⃣ Valider le paiement\n2️⃣ Faire le check-in", passengerName, bookingResult.BookingReference)
 }
 
 // Helper functions - must be at package level in Go

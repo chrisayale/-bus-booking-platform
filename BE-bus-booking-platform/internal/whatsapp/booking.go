@@ -62,7 +62,8 @@ func SearchJourneys(origin, destination, date string, agencyID string) ([]Journe
 		WHERE r.origin ILIKE $1
 		  AND r.destination ILIKE $2
 		  AND j.departure_date = $3
-		  AND j.status NOT IN ('cancelled', 'completed')`
+		  AND j.status NOT IN ('cancelled', 'completed')
+	`
 
 	var args []interface{}
 	args = append(args, "%"+origin+"%", "%"+destination+"%", date)
@@ -123,12 +124,30 @@ func SearchJourneysOnDate(date string, limit int) ([]JourneyResult, error) {
 }
 
 type CreatedTicket struct {
-	SeatNumber     string
-	PassengerName  string
-	PassengerPhone string
-	Price          float64
-	DownloadURL    string
-	QRToken        string
+	ID              string `db:"id"`
+	Destination     string `db:"destination"`
+	SeatNumber     string `db:"seat_number"`
+	PassengerName  string `db:"passenger_name"`
+	PassengerPhone string `db:"passenger_phone"`
+	Price          float64 `db:"price"`
+	DownloadURL    string `db:"-"`
+	QRToken        string `db:"qr_token"`
+	DownloadToken  string `db:"download_token"`
+	// Additional fields for ticket details display
+	AgencyName     string `db:"agency_name"`
+	Status         string `db:"status"`
+	DepartureCity  string `db:"departure_city"`
+	ArrivalCity    string `db:"arrival_city"`
+	DepartureTime  string `db:"departure_time"`
+	ArrivalTime    string `db:"arrival_time"`
+	Date           string `db:"date"`
+	ArrivalDate    string `db:"arrival_date"`
+	PaymentMethod  string `db:"payment_method"`
+	BookingReference string `db:"booking_reference"`
+	// New fields for ticket list display
+	Origin         string `db:"origin"`
+	TicketStatus   string `db:"ticket_status"`
+	BookingStatus  string `db:"booking_status"`
 }
 
 func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []PassengerDraft, appURL string) ([]CreatedTicket, string, error) {
@@ -153,6 +172,8 @@ func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []Pa
 
 	var basePrice float64
 	tx.Get(&basePrice, `SELECT base_price FROM routes WHERE id=$1`, journey.RouteID)
+	var destination string
+	tx.Get(&destination, `SELECT destination FROM routes WHERE id=$1`, journey.RouteID)
 	totalAmount := basePrice * float64(len(passengers))
 
 	bookingRef, err := utils.GenerateReference()
@@ -184,21 +205,24 @@ func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []Pa
 		expiry := time.Now().Add(7 * 24 * time.Hour)
 
 		_, err = tx.Exec(`
-			INSERT INTO tickets (booking_id, journey_id, seat_number, passenger_name, passenger_phone, price, qr_token, download_token, download_token_expires_at)
-			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)`,
-			bookingID, journeyID, p.SeatNumber, p.Name, models.NullString(p.Phone), basePrice, qrToken, tok, expiry,
+			INSERT INTO tickets (booking_id, journey_id, seat_number, passenger_name, passenger_phone, price, qr_token, download_token, download_token_expires_at, payment_validated)
+			VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, $10)`,
+			bookingID, journeyID, p.SeatNumber, p.Name, models.NullString(p.Phone), basePrice, qrToken, tok, expiry, false,
 		)
 		if err != nil {
 			return nil, "", err
 		}
 
 		tickets = append(tickets, CreatedTicket{
+			ID:             "",
+			Destination:    destination,
 			SeatNumber:     p.SeatNumber,
 			PassengerName:  p.Name,
 			PassengerPhone: p.Phone,
 			Price:          basePrice,
 			DownloadURL:    fmt.Sprintf("%s/tickets/download/%s", appURL, tok),
 			QRToken:        qrToken,
+			DownloadToken:  tok,
 		})
 	}
 
@@ -218,26 +242,72 @@ func GetBookedSeats(journeyID string) ([]string, error) {
 	return seats, nil
 }
 
-func GetTicketsByPhone(phone string) ([]CreatedTicket, error) {
-	rows, err := DB.Query(`
-		SELECT t.seat_number, t.passenger_name, t.price, t.download_token
-		FROM tickets t
-		WHERE t.passenger_phone = $1
-		ORDER BY t.created_at DESC
-		LIMIT 5`, phone)
+// GetTicketByDownloadToken retrieves a ticket by its download token.
+func GetTicketByDownloadToken(downloadToken string) (*CreatedTicket, error) {
+	var t CreatedTicket
+	err := DB.Get(&t, `SELECT seat_number, passenger_name, passenger_phone, price, download_token, qr_token FROM tickets WHERE download_token=$1`, downloadToken)
 	if err != nil {
 		return nil, err
 	}
-	defer rows.Close()
+	// Construct DownloadURL using AppURL
+	t.DownloadURL = fmt.Sprintf("%s/tickets/download/%s", AppURL, t.DownloadToken)
+	return &t, nil
+}
 
-	var results []CreatedTicket
-	for rows.Next() {
-		var t CreatedTicket
-		var downloadToken sql.NullString
-		if err := rows.Scan(&t.SeatNumber, &t.PassengerName, &t.Price, &downloadToken); err != nil {
-			continue
-		}
-		results = append(results, t)
+
+// UpdateTicketPaymentStatus marks the ticket as payment validated (cash payment).
+func UpdateTicketPaymentStatus(downloadToken string) error {
+	_, err := DB.Exec(`UPDATE tickets SET payment_validated = TRUE WHERE download_token=$1`, downloadToken)
+	return err
+}
+
+// UpdateTicketCheckinStatus marks the ticket as checked in.
+func UpdateTicketCheckinStatus(downloadToken string) error {
+	_, err := DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE download_token=$1`, downloadToken)
+	return err
+}
+
+type TicketDetail struct {
+	OrganizationID string `db:"organization_id"`
+	JourneyID      string `db:"journey_id"`
+}
+
+func GetTicketDetailsByDownloadToken(downloadToken string) (*TicketDetail, error) {
+	var td TicketDetail
+	// First check if the ticket exists with this download token
+	var exists bool
+	err := DB.Get(&exists, `SELECT EXISTS(SELECT 1 FROM tickets WHERE download_token=$1)`, downloadToken)
+	if err != nil {
+		return nil, err
 	}
-	return results, nil
+	if !exists {
+		return nil, fmt.Errorf("no ticket found with download token: %s", downloadToken)
+	}
+
+	// Get the ticket details
+	err = DB.Get(&td, `SELECT t.journey_id as journey_id, j.organization_id as organization_id FROM tickets t JOIN journeys j ON t.journey_id = j.id WHERE t.download_token=$1`, downloadToken)
+	if err != nil {
+		return nil, err
+	}
+	return &td, nil
+}
+
+// Fixed version of GetTicketDetailsByDownloadToken that properly retrieves ticket details
+func GetTicketDetailsByDownloadTokenFixed(downloadToken string) (*TicketDetail, error) {
+	var td TicketDetail
+	// Get journey_id from ticket
+	err := DB.Get(&td, `SELECT t.journey_id FROM tickets WHERE download_token=$1`, downloadToken)
+	if err != nil {
+		return nil, err
+	}
+
+	// Get organization_id from journey
+	var orgID string
+	err = DB.Get(&orgID, `SELECT j.organization_id FROM journeys j WHERE j.id = $1`, td.JourneyID)
+	if err != nil {
+		return nil, err
+	}
+	td.OrganizationID = orgID
+
+	return &td, nil
 }

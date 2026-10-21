@@ -55,3 +55,8 @@ func RoleMiddleware(roles ...string) gin.HandlerFunc {
 		c.AbortWithStatusJSON(http.StatusForbidden, gin.H{"error": "insufficient permissions"})
 	}
 }
+
+// AdminMiddleware checks if the user has platform_admin role
+func AdminMiddleware() gin.HandlerFunc {
+	return RoleMiddleware("platform_admin")
+}

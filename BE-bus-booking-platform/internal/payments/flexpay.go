@@ -25,22 +25,22 @@ type MobilePaymentRequest struct {
 	Reference   string `json:"reference"`
 	Phone       string `json:"phone"` // Ex: 243891234567
 	Amount      string `json:"amount"`
-	Currency    string `json:"currency"`    // CDF ou USD
-	Description string `json:"description"`
+	Currency    string `json:"currency"` // CDF ou USD
 	CallbackURL string `json:"callbackUrl"` // Respecter l'orthographe exacte
 }
 
 type CardPaymentRequest struct {
-	Merchant    string `json:"merchant"`
-	Type        string `json:"type"`
-	Reference   string `json:"reference"`
-	Amount      string `json:"amount"`
-	Currency    string `json:"currency"`
+	Merchant   string `json:"merchant"`
+	Type       string `json:"type"`
+	Reference  string `json:"reference"`
+	Amount     string `json:"amount"`
+	Currency   string `json:"currency"`
 	Description string `json:"description"`
-	CallbackURL string `json:"callbackUrl"`
-	ApproveURL  string `json:"approveUrl"`
-	CancelURL   string `json:"cancelUrl"`
-	DeclineURL  string `json:"declineUrl"`
+	CallbackURL string `json:"callback_url"`
+	ApproveURL  string `json:"approve_url"`
+	CancelURL   string `json:"cancel_url"`
+	DeclineURL  string `json:"decline_url"`
+	Authorization string `json:"authorization,omitempty"`
 }
 
 type PaymentResponse struct {
@@ -66,9 +66,14 @@ type CheckPaymentResponse struct {
 }
 
 func NewFlexPayProvider() *FlexPayProvider {
-	baseURL := os.Getenv("FLEXPAY_BASE_URL")
+	// Use PAY_BASE_URL for payment endpoints (mobile money and card payments)
+	baseURL := os.Getenv("FLEXPAY_PAY_BASE_URL")
 	if baseURL == "" {
-		baseURL = "https://backend.flexpay.cd"
+		// Fallback to old variable for backward compatibility
+		baseURL = os.Getenv("FLEXPAY_BASE_URL")
+	}
+	if baseURL == "" {
+		baseURL = "http://backend.flexpay.cd/api/rest/v1/paymentService"
 	}
 
 	auth := os.Getenv("FLEXPAY_AUTHORIZATION")
@@ -86,7 +91,7 @@ func NewFlexPayProvider() *FlexPayProvider {
 		if len(auth) > 10 {
 			maskedAuth = auth[:5] + "..." + auth[len(auth)-5:]
 		}
-		log.Printf("[FLEXPAY] Token chargé -> Longueur: %d | Nombre de parties (séparées par des points): %d | Valeur masquée: %s\n", 
+		log.Printf("[FLEXPAY] Token chargé -> Longueur: %d | Nombre de parties (séparées par des points): %d | Valeur masquée: %s\n",
 			len(auth), len(parts), maskedAuth)
 	}
 
@@ -100,7 +105,14 @@ func NewFlexPayProvider() *FlexPayProvider {
 
 // 1. Paiement Mobile Money (Push USSD)
 func (p *FlexPayProvider) CreateMobilePayment(req MobilePaymentRequest) (*PaymentResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/rest/v1/paymentService", p.BaseURL)
+	// For Mobile Money payments, use the specific HTTP endpoint
+	var endpoint string
+	if strings.HasSuffix(p.BaseURL, "/api/rest/v1/paymentService") {
+		// If baseURL already contains the payment service path, use it but ensure it's HTTP
+		endpoint = strings.Replace(p.BaseURL, "https://", "http://", 1)
+	} else {
+		endpoint = fmt.Sprintf("http://backend.flexpay.cd/api/rest/v1/paymentService")
+	}
 
 	req.Merchant = p.Merchant
 	req.Type = "1" // Forcer le type Mobile Money
@@ -120,6 +132,7 @@ func (p *FlexPayProvider) CreateMobilePayment(req MobilePaymentRequest) (*Paymen
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
 
 	authHeader := p.Authorization
 	if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
@@ -127,11 +140,20 @@ func (p *FlexPayProvider) CreateMobilePayment(req MobilePaymentRequest) (*Paymen
 	}
 	httpReq.Header.Set("Authorization", authHeader)
 
+	// Log request headers for debugging
+	log.Printf("[FLEXPAY] Request Headers: Content-Type=%s, Authorization=%s",
+		httpReq.Header.Get("Content-Type"),
+		httpReq.Header.Get("Authorization"))
+
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Log response status and headers for debugging
+	log.Printf("[FLEXPAY] Response Status: %d", resp.StatusCode)
+	log.Printf("[FLEXPAY] Response Headers: %v", resp.Header)
 
 	respBody, err := io.ReadAll(resp.Body)
 	if err != nil {
@@ -139,7 +161,7 @@ func (p *FlexPayProvider) CreateMobilePayment(req MobilePaymentRequest) (*Paymen
 	}
 
 	// Log the raw response body from FlexPay for debugging
-	log.Printf("[FLEXPAY] Raw response body: %s", string(respBody))
+	log.Printf("[FLEXPAY] Raw response body: %q", string(respBody)) // Using %q to show empty string clearly
 
 	var result PaymentResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -151,7 +173,8 @@ func (p *FlexPayProvider) CreateMobilePayment(req MobilePaymentRequest) (*Paymen
 
 // CheckOrderStatus vérifie l'état d'un paiement via l'API FlexPay
 func (p *FlexPayProvider) CheckOrderStatus(orderNumber string) (*CheckPaymentResponse, error) {
-	endpoint := fmt.Sprintf("%s/api/rest/v1/check/%s", p.BaseURL, orderNumber)
+	// For check requests, use the dedicated backend endpoint for status checks
+	endpoint := fmt.Sprintf("https://backend.flexpay.cd/api/rest/v1/check/%s", orderNumber)
 
 	httpReq, err := http.NewRequest("GET", endpoint, nil)
 	if err != nil {
@@ -159,6 +182,7 @@ func (p *FlexPayProvider) CheckOrderStatus(orderNumber string) (*CheckPaymentRes
 	}
 
 	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
 
 	authHeader := p.Authorization
 	if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
@@ -166,11 +190,20 @@ func (p *FlexPayProvider) CheckOrderStatus(orderNumber string) (*CheckPaymentRes
 	}
 	httpReq.Header.Set("Authorization", authHeader)
 
+	// Log request headers for debugging
+	log.Printf("[FLEXPAY] Request Headers: Content-Type=%s, Authorization=%s",
+		httpReq.Header.Get("Content-Type"),
+		httpReq.Header.Get("Authorization"))
+
 	resp, err := p.httpClient.Do(httpReq)
 	if err != nil {
 		return nil, err
 	}
 	defer resp.Body.Close()
+
+	// Log response status and headers for debugging
+	log.Printf("[FLEXPAY] Response Status: %d", resp.StatusCode)
+	log.Printf("[FLEXPAY] Response Headers: %v", resp.Header)
 
 	if resp.StatusCode == http.StatusNotFound {
 		// Return a synthetic response indicating transaction still pending (status 2)
@@ -198,7 +231,7 @@ func (p *FlexPayProvider) CheckOrderStatus(orderNumber string) (*CheckPaymentRes
 	}
 
 	// Log the raw response body from FlexPay for debugging
-	log.Printf("[FLEXPAY] Raw response body for CheckOrderStatus request (orderNumber=%s): %s", orderNumber, string(respBody))
+	log.Printf("[FLEXPAY] Raw response body for CheckOrderStatus request (orderNumber=%s): %q", orderNumber, string(respBody)) // Using %q to show empty string clearly
 
 	var result CheckPaymentResponse
 	if err := json.Unmarshal(respBody, &result); err != nil {
@@ -211,3 +244,75 @@ func (p *FlexPayProvider) CheckOrderStatus(orderNumber string) (*CheckPaymentRes
 	return &result, nil
 }
 
+// CreateCardPayment effectue un paiement par carte bancaire via l'API FlexPay
+func (p *FlexPayProvider) CreateCardPayment(req CardPaymentRequest) (*PaymentResponse, error) {
+	// Use dedicated card payment endpoint with environment variable override
+	cardEndpoint := os.Getenv("FLEXPAY_CARD_ENDPOINT")
+	if cardEndpoint == "" {
+		cardEndpoint = "https://cardpayment.flexpay.cd/v1.1/pay"
+	}
+
+	req.Merchant = p.Merchant
+	req.Type = "2" // Forcer le type carte bancaire
+	req.Description = "Paiement billet de voyage GUV"
+
+	// Set authorization field for V2 card endpoint authentication (Bearer token in JSON body)
+	authValue := os.Getenv("FLEXPAY_TOKEN")
+	if authValue == "" {
+		// Fallback to using authorization header value
+		authValue = p.Authorization
+	}
+	// Ensure it has the Bearer prefix if not already present
+	if authValue != "" && !strings.HasPrefix(strings.ToLower(authValue), "bearer ") {
+		authValue = "Bearer " + authValue
+	}
+	req.Authorization = authValue
+
+	data, err := json.Marshal(req)
+	if err != nil {
+		return nil, err
+	}
+
+	// Log the exact URL and JSON payload being sent to FlexPay
+	log.Printf("[FLEXPAY] Calling URL: %s", cardEndpoint)
+	log.Printf("[FLEXPAY] JSON payload: %s", string(data))
+
+	httpReq, err := http.NewRequest("POST", cardEndpoint, bytes.NewReader(data))
+	if err != nil {
+		return nil, err
+	}
+
+	httpReq.Header.Set("Content-Type", "application/json")
+	httpReq.Header.Set("Accept", "application/json")
+	// Note: Authorization is now in the JSON body, not in headers for V2 card endpoint
+
+	// Log request headers for debugging
+	log.Printf("[FLEXPAY] Request Headers: Content-Type=%s, Accept=%s",
+		httpReq.Header.Get("Content-Type"),
+		httpReq.Header.Get("Accept"))
+
+	resp, err := p.httpClient.Do(httpReq)
+	if err != nil {
+		return nil, err
+	}
+	defer resp.Body.Close()
+
+	// Log response status and headers for debugging
+	log.Printf("[FLEXPAY] Response Status: %d", resp.StatusCode)
+	log.Printf("[FLEXPAY] Response Headers: %v", resp.Header)
+
+	respBody, err := io.ReadAll(resp.Body)
+	if err != nil {
+		return nil, err
+	}
+
+	// Log the raw response body from FlexPay for debugging
+	log.Printf("[FLEXPAY] Raw response body: %q", string(respBody)) // Using %q to show empty string clearly
+
+	var result PaymentResponse
+	if err := json.Unmarshal(respBody, &result); err != nil {
+		return nil, fmt.Errorf("réponse FlexPay invalide: %s", string(respBody))
+	}
+
+	return &result, nil
+}

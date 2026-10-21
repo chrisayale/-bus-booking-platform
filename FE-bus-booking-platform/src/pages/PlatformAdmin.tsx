@@ -43,11 +43,12 @@ export default function PlatformAdmin() {
   const fetchAll = async () => {
     try {
       const [pendingData, agenciesData] = await Promise.all([
-        api.get<PendingAgency[]>("/platform/pending-agencies"),
-        api.get<Agency[]>("/platform/agencies"),
+        api.get<any>("/platform/pending-agencies"),
+        api.get<any>("/platform/agencies"),
       ])
-      setPending(pendingData)
-      setAgencies(agenciesData)
+      // Ensure we always set arrays to state, even if API returns non-array data
+      setPending(Array.isArray(pendingData) ? pendingData : [])
+      setAgencies(Array.isArray(agenciesData) ? agenciesData : [])
     } catch (err) {
       setError((err as Error).message)
     } finally {
@@ -60,8 +61,15 @@ export default function PlatformAdmin() {
     setExchangeRateError(null)
     setExchangeRateSuccess(null)
     try {
-      const data = await api.get<{ usd_to_cdf: number }>("/admin/exchange-rate")
-      setExchangeRate(data.usd_to_cdf)
+      const data = await api.get<any>("/admin/exchange-rate")
+      // Ensure we have an object with the expected property
+      if (data && typeof data === 'object' && 'usd_to_cdf' in data && typeof data.usd_to_cdf === 'number') {
+        setExchangeRate(data.usd_to_cdf)
+      } else {
+        // Handle invalid response format
+        setExchangeRateError("Invalid exchange rate data format")
+        setExchangeRate(null)
+      }
     } catch (err) {
       setExchangeRateError((err as Error).message)
     } finally {

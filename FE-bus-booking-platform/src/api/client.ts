@@ -88,7 +88,15 @@ export async function apiRequest<T>(
     throw new Error(error.error || `HTTP ${res.status}`)
   }
 
-  return res.json()
+  // Handle empty JSON response
+  let json: T
+  try {
+    json = await res.json()
+  } catch (e) {
+    // If parsing fails (e.g., empty body), treat as null
+    json = null as unknown as T
+  }
+  return json
 }
 
 // Convenience methods

@@ -15,14 +15,17 @@ const (
 	StepPassengerName          Step = "passenger_name"
 	StepPassengerPhone         Step = "passenger_phone"
 	StepConfirm                Step = "confirm"
-		StepPaymentMethodChoice  Step = "payment_method_choice"
-		StepPhonePaymentChoice     Step = "payment_phone_choice"
+	StepSearchAgency           Step = "search_agency"
+	StepPhonePaymentChoice     Step = "payment_phone_choice"
 	StepPaymentOtherPhoneInput Step = "payment_other_phone_input"
 	StepPaymentProcessing      Step = "payment_processing"
-		StepPaymentProcessingWait  Step = "payment_processing_wait"
-		StepPaymentCompleted       Step = "payment_completed"
+	StepPaymentProcessingWait  Step = "payment_processing_wait"
+	StepPaymentCompleted       Step = "payment_completed"
 	StepCurrencyChoice         Step = "currency_choice"
+	StepPaymentMethodChoice    Step = "payment_method_choice"
 	StepMyTicketsPhone         Step = "my_tickets_phone"
+	StepMyTicketsList          Step = "my_tickets_list"
+	StepMyTicketDetails        Step = "my_ticket_details"
 	StepAgencyChoice           Step = "agency_choice"
 	StepAgencyMenu             Step = "agency_menu"
 	StepAgencyDateChoice       Step = "agency_date_choice"
@@ -43,6 +46,29 @@ const (
 	// Payment failed/expired states
 	StepPaymentFailed        Step = "payment_failed"
 	StepPaymentExpired       Step = "payment_expired"
+	// Verification flow
+	StepVerificationMenu     Step = "verification_menu"
+	StepViewTickets          Step = "view_tickets"
+	StepSelectTicketDetails  Step = "select_ticket_details"
+	StepCheckTicketInput     Step = "check_ticket_input"
+	StepAgentPinInput        Step = "agent_pin_input"
+	StepAgentCashPayment     Step = "agent_cash_payment"
+	StepAgentTicketEmission  Step = "agent_ticket_emission"
+	StepPassengerCheckType   Step = "passenger_check_type"
+	StepCheckCodeInput       Step = "check_code_input"
+	StepCheckQRInput         Step = "check_qr_input"
+	// Controller flow
+	StepControllerInput               Step = "controller_input"
+	StepControllerPin                 Step = "controller_pin"
+	StepControllerMenu                Step = "controller_menu"
+	StepControllerActions             Step = "controller_actions"
+	StepControllerPaymentMethod       Step = "controller_payment_method"
+	StepControllerInputBookingRef     Step = "controller_input_booking_ref"
+	StepControllerInputPhone          Step = "controller_input_phone"
+	StepControllerInputQRCode         Step = "controller_input_qr_code"
+	StepControllerPaymentReferenceInput Step = "controller_payment_reference_input"
+	StepControllerCheckInConfirm      Step = "controller_checkin_confirm"
+	StepControllerCheckInProcess      Step = "controller_checkin_process"
 )
 
 type Agency struct {
@@ -84,12 +110,20 @@ type Session struct {
 	ContactPhone string
 	// User's WhatsApp phone number (verified from session)
 	UserPhone    string
+	AgentID      string
+	IsControllerAuthenticated bool
 	// PaymentError stores the last payment error message for retry functionality
 	PaymentError string
 	// NotificationSent indicates whether a final notification (success or error) has been sent to avoid duplicates.
 	NotificationSent bool
 	// HasRetried indicates whether the user has already attempted a payment retry
 	HasRetried     bool
+	// Tickets stores the list of tickets for the current user when in my_tickets_list step
+	Tickets        []CreatedTicket
+	// Data stores additional session data as key-value pairs
+	Data           map[string]interface{}
+	AgentName                 string
+	AssignedAgencies          []Agency
 }
 
 type JourneyResult struct {
@@ -114,7 +148,7 @@ func getSession(phone string) *Session {
 	defer sessionsMu.Unlock()
 	s, ok := sessions[phone]
 	if !ok {
-		s = &Session{Step: StepMenu, UserPhone: phone, NotificationSent: false, PaymentError: "", HasRetried: false}
+		s = &Session{Step: StepMenu, UserPhone: phone, NotificationSent: false, PaymentError: "", HasRetried: false, IsControllerAuthenticated: false, AgentID: "", Data: make(map[string]interface{})}
 		sessions[phone] = s
 	}
 	return s
@@ -129,7 +163,7 @@ func saveSession(phone string, s *Session) {
 func resetSession(phone string) {
 	sessionsMu.Lock()
 	defer sessionsMu.Unlock()
-	sessions[phone] = &Session{Step: StepMenu, UserPhone: phone, NotificationSent: false, PaymentError: "", HasRetried: false}
+	sessions[phone] = &Session{Step: StepMenu, UserPhone: phone, NotificationSent: false, PaymentError: "", HasRetried: false, IsControllerAuthenticated: false, AgentID: "", Data: make(map[string]interface{})}
 }
 
 // SetSessionStep sets the session step for a given phone number.

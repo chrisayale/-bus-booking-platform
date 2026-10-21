@@ -24,8 +24,9 @@ export default function Admins() {
 
   const fetchAdmins = async () => {
     try {
-      const data = await api.get<UserType[]>("/admin/users")
-      setAdmins(data)
+      const data = await api.get<any>("/admin/users")
+      // Ensure we always set array to state, even if API returns non-array data
+      setAdmins(Array.isArray(data) ? data : [])
     } catch (err) {
       console.error("Failed to fetch admins:", err)
     } finally {

@@ -24,7 +24,7 @@ func NewGuestHandler(db *sqlx.DB, qrSecret string, emailSvc *services.EmailServi
 }
 
 type GuestCheckoutRequest struct {
-	JourneyID string             `json:"journey_id" binding:"required"`
+	JourneyID  string            `json:"journey_id" binding:"required"`
 	GuestEmail string            `json:"guest_email" binding:"required"`
 	GuestName  string            `json:"guest_name" binding:"required"`
 	Seats      []models.BookSeat `json:"seats" binding:"required,min=1"`
@@ -148,9 +148,9 @@ func (h *GuestHandler) GuestCheckout(c *gin.Context) {
 		if err := h.EmailService.SendTicketInvoice(req.GuestEmail, req.GuestName, bookingRef, ticketInfos, downloadLink); err != nil {
 			// Log but don't fail the request — booking is already confirmed
 			c.JSON(http.StatusCreated, gin.H{
-				"booking": booking,
+				"booking":      booking,
 				"email_status": "failed",
-				"warning": "booking confirmed but email could not be sent. Configure SMTP in your .env file.",
+				"warning":      "booking confirmed but email could not be sent. Configure SMTP in your .env file.",
 			})
 			return
 		}

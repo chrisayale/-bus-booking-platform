@@ -3,10 +3,13 @@ export interface User {
   email: string
   full_name: string
   phone?: string
-  role: "owner" | "passenger" | "platform_admin"
+  role: "owner" | "passenger" | "platform_admin" | "agent" | "controller"
   organization_id?: string
+  organizations?: Organization[]
   is_verified: boolean
   created_at: string
+  pin?: string
+  isActive: boolean
 }
 
 export interface Bus {
@@ -36,7 +39,6 @@ export interface Route {
   origin: string
   destination: string
   base_price: number
-  is_active: boolean
   stops: Stop[]
   created_at: string
 }
@@ -49,6 +51,11 @@ export interface Stop {
   arrival_offset_minutes?: number
   departure_offset_minutes?: number
   stop_price: number
+  qr_token?: string
+  status: "active" | "checked_in" | "missed" | "cancelled" | "refunded"
+  checked_in_at?: string
+  journey?: Journey
+  created_at: string
 }
 
 export interface Organization {

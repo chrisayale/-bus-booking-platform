@@ -16,21 +16,21 @@ func NewAnalyticsHandler(db *sqlx.DB) *AnalyticsHandler {
 }
 
 type DashboardStats struct {
-	TotalBuses     int              `json:"total_buses"`
-	ActiveBuses    int              `json:"active_buses"`
-	TotalRoutes    int              `json:"total_routes"`
-	TotalJourneys  int              `json:"total_journeys"`
-	UpcomingJourneys int           `json:"upcoming_journeys"`
-	TotalBookings  int              `json:"total_bookings"`
-	TotalRevenue   float64          `json:"total_revenue"`
-	ActiveTickets  int              `json:"active_tickets"`
-	CheckedIn      int              `json:"checked_in"`
-	MissedTickets  int              `json:"missed_tickets"`
-	CanceledTickets int            `json:"canceled_tickets"`
-	SeatOccupancy  float64          `json:"seat_occupancy"` // percentage
-	MonthlyRevenue []MonthlyRevenue `json:"monthly_revenue"`
-	PopularRoutes  []PopularRoute   `json:"popular_routes"`
-	RecentJourneys []JourneySummary `json:"recent_journeys"`
+	TotalBuses       int              `json:"total_buses"`
+	ActiveBuses      int              `json:"active_buses"`
+	TotalRoutes      int              `json:"total_routes"`
+	TotalJourneys    int              `json:"total_journeys"`
+	UpcomingJourneys int              `json:"upcoming_journeys"`
+	TotalBookings    int              `json:"total_bookings"`
+	TotalRevenue     float64          `json:"total_revenue"`
+	ActiveTickets    int              `json:"active_tickets"`
+	CheckedIn        int              `json:"checked_in"`
+	MissedTickets    int              `json:"missed_tickets"`
+	CanceledTickets  int              `json:"canceled_tickets"`
+	SeatOccupancy    float64          `json:"seat_occupancy"` // percentage
+	MonthlyRevenue   []MonthlyRevenue `json:"monthly_revenue"`
+	PopularRoutes    []PopularRoute   `json:"popular_routes"`
+	RecentJourneys   []JourneySummary `json:"recent_journeys"`
 }
 
 type MonthlyRevenue struct {
@@ -40,10 +40,10 @@ type MonthlyRevenue struct {
 }
 
 type PopularRoute struct {
-	RouteName    string `db:"route_name" json:"route_name"`
-	Origin       string `db:"origin" json:"origin"`
-	Destination  string `db:"destination" json:"destination"`
-	TicketCount  int    `db:"ticket_count" json:"ticket_count"`
+	RouteName   string `db:"route_name" json:"route_name"`
+	Origin      string `db:"origin" json:"origin"`
+	Destination string `db:"destination" json:"destination"`
+	TicketCount int    `db:"ticket_count" json:"ticket_count"`
 }
 
 type JourneySummary struct {

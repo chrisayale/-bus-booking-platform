@@ -45,8 +45,8 @@ func (s *EmailService) SendVerificationEmail(to, name, token string) error {
 	subject := "Verify your BusBook account"
 
 	body, _ := renderTemplate(emailVerificationHTML, map[string]string{
-		"Name":  name,
-		"Link":  link,
+		"Name":   name,
+		"Link":   link,
 		"AppURL": s.appURL,
 	})
 
@@ -58,8 +58,8 @@ func (s *EmailService) SendPasswordResetEmail(to, name, token string) error {
 	subject := "Reset your BusBook password"
 
 	body, _ := renderTemplate(passwordResetHTML, map[string]string{
-		"Name":  name,
-		"Link":  link,
+		"Name":   name,
+		"Link":   link,
 		"AppURL": s.appURL,
 	})
 

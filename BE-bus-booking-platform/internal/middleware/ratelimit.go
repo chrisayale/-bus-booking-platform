@@ -18,7 +18,7 @@ type RateLimiter struct {
 }
 
 type visitor struct {
-	count    int
+	count       int
 	windowStart time.Time
 }
 

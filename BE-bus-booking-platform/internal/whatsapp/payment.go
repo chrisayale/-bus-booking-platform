@@ -1,25 +1,21 @@
 // THIS IS A TEST TO SEE IF THE FILE IS BEING UPDATED CORRECTLY
 
 package whatsapp
-
 import (
-	"bytes"
 	"context"
-	"database/sql"
 	"encoding/json"
 	"fmt"
-	"io"
 	"log"
-	"net/http"
 	"strings"
 	"time"
 	"unicode"
 
-	"github.com/bus-booking/BE-bus-booking-platform/internal/models"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/payments"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
 	"github.com/jmoiron/sqlx"
+	"database/sql"
 	"go.mau.fi/whatsmeow/types"
+	"github.com/bus-booking/BE-bus-booking-platform/internal/models"
 )
 
 // CleanPhoneNumber removes all non-digit characters and ensures the number starts with the DRC country code (243).
@@ -117,69 +113,42 @@ func InitiateOnlinePayment(journeyID string, journey JourneyResult, passengers [
 		return "", "", err
 	}
 
-	// Appel direct à l'API REST FlexPay pour les paiements par carte (type "2")
-	endpoint := fmt.Sprintf("%s/api/rest/v1/paymentService", FlexPay.BaseURL)
-
-	// Utiliser le numéro de téléphone tel quel pour les paiements par carte (pas de nettoyage)
-	customerPhone := flexPayPhone
-
-	req := struct {
-		Merchant    string `json:"merchant"`
-		Type        string `json:"type"` // "2" pour carte
-		Reference   string `json:"reference"`
-		Amount      string `json:"amount"`
-		Currency    string `json:"currency"`    // CDF ou USD
-		Description string `json:"description"`
-		CallbackURL string `json:"callbackUrl"` // Respecter l'orthographe exacte
-		Phone       string `json:"phone"`         // Numéro de téléphone du client
-	}{
+	// Appel à l'API REST FlexPay pour les paiements par carte (type "2") via le provider
+	req := payments.CardPaymentRequest{
 		Merchant:    FlexPay.Merchant,
 		Type:        "2", // Type "2" pour les paiements par carte
 		Reference:   reference,
 		Amount:      fmt.Sprintf("%.2f", totalAmount),
 		Currency:    currencyCode,
-		Description: description,
 		CallbackURL: AppURL + "/api/payments/flexpay/callback",
-		Phone:       customerPhone,
+		ApproveURL:  AppURL + "/api/payments/flexpay/approve",
+		CancelURL:   AppURL + "/api/payments/flexpay/cancel",
+		DeclineURL:  AppURL + "/api/payments/flexpay/decline",
 	}
+	// Log the URL values for debugging
+	log.Printf("[FLEXPAY] Debug URLs - Callback: %s, Approve: %s, Cancel: %s, Decline: %s",
+		AppURL+"/api/payments/flexpay/callback",
+		AppURL+"/api/payments/flexpay/approve",
+		AppURL+"/api/payments/flexpay/cancel",
+		AppURL+"/api/payments/flexpay/decline")
+	// Additional debug logging for AppURL
+	log.Printf("[FLEXPAY] Debug AppURL value: %s", AppURL)
 
+	// Log the exact JSON payload sent to FlexPay for inspection
 	data, err := json.Marshal(req)
 	if err != nil {
 		return "", "", err
 	}
-
-	// Log the exact JSON payload sent to FlexPay for inspection
 	log.Printf("[FLEXPAY] Sending payload for reference %s: %s", reference, string(data))
 
-	httpReq, err := http.NewRequest("POST", endpoint, bytes.NewReader(data))
+	// Utiliser la méthode CreateCardPayment du provider
+	flexPayResp, err := FlexPay.CreateCardPayment(req)
 	if err != nil {
 		return "", "", err
 	}
 
-	httpReq.Header.Set("Content-Type", "application/json")
-
-	// Copie de la logique d'autorisation depuis payments.CreateMobilePayment
-	authHeader := FlexPay.Authorization
-	if !strings.HasPrefix(strings.ToLower(authHeader), "bearer ") {
-		authHeader = "Bearer " + authHeader
-	}
-	httpReq.Header.Set("Authorization", authHeader)
-
-	// Créer un http.Client local puisque httpClient n'est pas exporté dans FlexPayProvider
-	httpClient := &http.Client{Timeout: 300 * time.Second}
-	resp, err := httpClient.Do(httpReq)
-	if err != nil {
-		return "", "", err
-	}
-	defer resp.Body.Close()
-
-	respBody, err := io.ReadAll(resp.Body)
-	if err != nil {
-		return "", "", err
-	}
-
-	// Log the raw response body from FlexPay for debugging
-	log.Printf("[FLEXPAY] Raw response body for reference %s: %s", reference, string(respBody))
+	// Log the request payload sent to FlexPay for debugging (response logged in CreateCardPayment)
+	log.Printf("[FLEXPAY] Request payload for reference %s: %s", reference, string(data))
 
 	var result struct {
 		Code        string `json:"code"`
@@ -187,9 +156,10 @@ func InitiateOnlinePayment(journeyID string, journey JourneyResult, passengers [
 		URL         string `json:"url,omitempty"`
 		OrderNumber string `json:"orderNumber,omitempty"`
 	}
-	if err := json.Unmarshal(respBody, &result); err != nil {
-		return "", "", fmt.Errorf("réponse FlexPay invalide: %s", string(respBody))
-	}
+	result.Code = flexPayResp.Code
+	result.Message = flexPayResp.Message
+	result.URL = flexPayResp.URL
+	result.OrderNumber = flexPayResp.OrderNumber
 
 	if result.Code != "0" {
 		return "", "", fmt.Errorf("FlexPay a refusé la demande: %s", result.Message)
@@ -275,7 +245,6 @@ func InitiateMobileMoneyPayment(journeyID string, journey JourneyResult, passeng
 		Phone:       cleanedPhone, // Use cleaned phone number to ensure correct format
 		Amount:      fmt.Sprintf("%.2f", totalAmount),
 		Currency:    currencyCode,
-		Description: description,
 		CallbackURL: AppURL + "/api/payments/flexpay/callback",
 	})
 	if err != nil {
@@ -301,65 +270,6 @@ func InitiateMobileMoneyPayment(journeyID string, journey JourneyResult, passeng
 
 	log.Printf("[DEBUG] InitiateMobileMoneyPayment terminé avec succès pour la référence %s", reference)
 	return res.Message, reference, nil
-}
-
-// CompleteBookingFromPayment finalise la réservation après confirmation du paiement
-func CompleteBookingFromPayment(p *payments.Payment) error {
-	if !p.Metadata.Valid || p.Metadata.String == "" {
-		return fmt.Errorf("paiement %s sans metadata, impossible de créer la réservation", p.Reference)
-	}
-
-	var meta pendingBookingMetadata
-	if err := json.Unmarshal([]byte(p.Metadata.String), &meta); err != nil {
-		return fmt.Errorf("metadata invalide: %w", err)
-	}
-
-	cleanedPhone := CleanPhoneNumber(meta.GuestPhone)
-	jid := types.NewJID(cleanedPhone, "s.whatsapp.net")
-
-	_, _, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL)
-	if err != nil {
-		SendText(jid, fmt.Sprintf(
-			"⚠️ Votre paiement a été confirmé, mais un problème est survenu lors de la création de votre billet : %s\nContactez le support. Référence paiement : %s",
-			err.Error(), p.Reference))
-		return err
-	}
-
-	var mj models.Journey
-	err = DB.Get(&mj, `
-		SELECT id, organization_id, route_id, bus_id,
-			departure_date::text, departure_time::text,
-			arrival_date::text, arrival_time::text,
-			status, created_at, updated_at
-		FROM journeys WHERE id=$1`, meta.JourneyID)
-	if err == nil {
-		_ = enrichJourneys([]models.Journey{mj})
-	}
-
-	var amountStr string
-	if p.Amount != 0 {
-		amountStr = fmt.Sprintf("%.2f", p.Amount)
-	} else {
-		amountStr = "0.00"
-	}
-	var dateHeure string
-	if !p.CreatedAt.IsZero() {
-		dateHeure = p.CreatedAt.Format("02/01/2006 15:04:05")
-	} else {
-		dateHeure = "date inconnue"
-	}
-	var statut string
-	if p.Status == "0" {
-		statut = "Confirmé & Validé"
-	} else {
-		statut = fmt.Sprintf("Statut %s", p.Status)
-	}
-
-	confirmationMsg := fmt.Sprintf("✅ PAIEMENT CONFIRMÉ !\n\n🧾 REÇU DE FACTURATION :\n- ID Transaction : %s\n- Mode de paiement : %s\n- Montant : %s\n- Date & Heure : %s\n- Statut : %s\n\n🎟️ Votre billet de bus est désormais OFFICIELLEMENT CONFIRMÉ.\n⚠️ Veuillez présenter ce billet ou votre code de confirmation lors de l'embarquement pour vérification.\n\n🚌 Toute l'équipe d'AyaleTrans vous souhaite un très bon voyage !\n\n📞 Assistance Client :\n- Tél & WhatsApp : +243974645174",
-		p.Reference, meta.PaymentType, amountStr, dateHeure, statut)
-
-	SendText(jid, confirmationMsg)
-	return nil
 }
 
 // StartOrderStatusPoller démarre une goroutine qui vérifie l'état d'un paiement toutes les 5 secondes pendant 5 minutes
@@ -461,81 +371,17 @@ func StartOrderStatusPoller(ctx context.Context, db *sqlx.DB, flexPay *payments.
 	}
 }
 
-// StartPaymentTimeoutWorker démarre un worker en arrière-plan qui vérifie périodiquement
-// les paiements en attente depuis plus de 300 secondes et les marque comme expirés.
-func StartPaymentTimeoutWorker() {
-	go func() {
-		ticker := time.NewTicker(10 * time.Second) // Vérifier toutes les 10 secondes
-		defer ticker.Stop()
-		cleanupOldPendingPayments()
-
-		for {
-			select {
-			case <-ticker.C:
-				// Récupérer tous les paiements en attente depuis plus de 300 secondes
-				var expiredPayments []payments.Payment
-				err := DB.Select(&expiredPayments, `
-					SELECT * FROM payments
-					WHERE status = $1
-					AND created_at < NOW() - INTERVAL '300 seconds'
-					ORDER BY created_at
-					LIMIT 50
-				`, payments.StatusPending)
-
-				if err != nil {
-					log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la recherche des paiements expirés: %v", err)
-					continue
-				}
-
-				// Traiter chaque paiement expiré
-				for _, payment := range expiredPayments {
-					log.Printf("[PAYMENT TIMEOUT WORKER] Traitement du paiement expiré: %s", payment.Reference)
-
-					// Double-check that payment is still pending before processing
-					var currentStatus string
-					err := DB.Get(&currentStatus, `SELECT status FROM payments WHERE id = $1`, payment.ID)
-					if err != nil || currentStatus != payments.StatusPending {
-						log.Printf("[PAYMENT TIMEOUT WORKER] Payment %s is no longer pending (status: %s), skipping", payment.Reference, currentStatus)
-						continue
-					}
-
-					// Update payment status to expired
-					var result sql.Result
-
-					if payment.OrderNumber.Valid {
-						result, err = DB.Exec(
-							"UPDATE payments SET status = $1, callback_data = $2, updated_at = NOW() WHERE order_number = $3 AND status = $4",
-							payments.StatusExpired, "", payment.OrderNumber.String, payments.StatusPending,
-						)
-					} else {
-						// Fallback: update by ID if OrderNumber is not valid
-						result, err = DB.Exec(
-							"UPDATE payments SET status = $1, callback_data = $2, updated_at = NOW() WHERE id = $3 AND status = $4",
-							payments.StatusExpired, "", payment.ID, payments.StatusPending,
-						)
-					}
-
-					if err != nil {
-						log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la mise à jour du statut en expiré pour la référence %s: %v", payment.Reference, err)
-						continue
-					}
-
-					rowsAffected, err := result.RowsAffected()
-					if err != nil {
-						log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la récupération du nombre de lignes affectées: %v", err)
-						continue
-					}
-					if rowsAffected == 0 {
-						log.Printf("[PAYMENT TIMEOUT WORKER] Paiement %s n'est plus en statut pending (déjà traité)", payment.Reference)
-						continue
-					}
-
-					// Database update successful, now attempt to send expiration message with fallback
-					handlePaymentExpiration(payment.Reference, payment.OrderNumber.String)
-				}
-			}
-		}
-	}()
+// cleanupOldPendingPayments met à jour tous les paiements PENDING plus anciens que 300 secondes en EXPIRED
+func cleanupOldPendingPayments() {
+	_, err := DB.Exec(`
+		UPDATE payments
+		SET status = $1, updated_at = NOW()
+		WHERE status = $2
+		AND created_at < NOW() - INTERVAL '300 seconds'
+	`, payments.StatusExpired, payments.StatusPending)
+	if err != nil {
+		log.Printf("[PAYMENT TIMEOUT WORKER] Cleanup error: %v", err)
+	}
 }
 
 // handlePaymentExpiration gère l'expiration d'un paiement en envoyant une notification
@@ -648,69 +494,134 @@ func handlePaymentExpiration(reference string, orderNumber string) {
 	}
 }
 
-// cleanupOldPendingPayments met à jour tous les paiements PENDING plus anciens que 300 secondes en EXPIRED
-func cleanupOldPendingPayments() {
-	_, err := DB.Exec(`
-		UPDATE payments
-		SET status = $1, updated_at = NOW()
-		WHERE status = $2
-		AND created_at < NOW() - INTERVAL '300 seconds'
-	`, payments.StatusExpired, payments.StatusPending)
+func CompleteBookingFromPayment(p *payments.Payment) error {
+	if !p.Metadata.Valid || p.Metadata.String == "" {
+		return fmt.Errorf("paiement %s sans metadata, impossible de créer la réservation", p.Reference)
+	}
+
+	var meta pendingBookingMetadata
+	if err := json.Unmarshal([]byte(p.Metadata.String), &meta); err != nil {
+		return fmt.Errorf("metadata invalide: %w", err)
+	}
+
+	cleanedPhone := CleanPhoneNumber(meta.GuestPhone)
+	jid := types.NewJID(cleanedPhone, "s.whatsapp.net")
+
+	_, _, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL)
 	if err != nil {
-		log.Printf("[PAYMENT TIMEOUT WORKER] Cleanup error: %v", err)
-	}
-}
-
-// getSessionByReference retrieves a session by payment reference from metadata
-func getSessionByReference(reference string) *Session {
-	var pendingMeta PendingBookingMetadata
-	var phone string
-
-	// Get payment by reference to extract metadata
-	payment, err := payments.GetByReference(DB, reference)
-	if err != nil || !payment.Metadata.Valid || payment.Metadata.String == "" {
-		return nil
+		SendText(jid, fmt.Sprintf(
+			"⚠️ Votre paiement a été confirmé, mais un problème est survenu lors de la création de votre billet : %s\nContactez le support. Référence paiement : %s",
+			err.Error(), p.Reference))
+		return err
 	}
 
-	if err := json.Unmarshal([]byte(payment.Metadata.String), &pendingMeta); err != nil {
-		return nil
+	var mj models.Journey
+	err = DB.Get(&mj, `
+		SELECT id, organization_id, route_id, bus_id,
+			departure_date::text, departure_time::text,
+			arrival_date::text, arrival_time::text,
+			status, created_at, updated_at
+		FROM journeys WHERE id=$1`, meta.JourneyID)
+	if err == nil {
+		_ = enrichJourneys([]models.Journey{mj})
 	}
 
-	if pendingMeta.RecipientJID != "" {
-		// Extract phone from JID (format: 243xxxxxxxxx@s.whatsapp.net)
-		jidStr := strings.TrimSpace(pendingMeta.RecipientJID)
-		if atIdx := strings.Index(jidStr, "@"); atIdx > 0 {
-			phone = jidStr[:atIdx]
-		}
+	var amountStr string
+	if p.Amount != 0 {
+		amountStr = fmt.Sprintf("%.2f", p.Amount)
 	} else {
-		phone = CleanPhoneNumber(pendingMeta.GuestPhone)
+		amountStr = "0.00"
+	}
+	var dateHeure string
+	if !p.CreatedAt.IsZero() {
+		dateHeure = p.CreatedAt.Format("02/01/2006 15:04:05")
+	} else {
+		dateHeure = "date inconnue"
+	}
+	var statut string
+	if p.Status == "0" {
+		statut = "Confirmé & Validé"
+	} else {
+		statut = fmt.Sprintf("Statut %s", p.Status)
 	}
 
-	if phone == "" {
-		return nil
-	}
+	confirmationMsg := fmt.Sprintf("✅ PAIEMENT CONFIRMÉ !\n\n🧾 REÇU DE FACTURATION :\n- ID Transaction : %s\n- Mode de paiement : %s\n- Montant : %s\n- Date & Heure : %s\n- Statut : %s\n\n🎟️ Votre billet de bus est désormais OFFICIELLEMENT CONFIRMÉ.\n⚠️ Veuillez présenter ce billet ou votre code de confirmation lors de l'embarquement pour vérification.\n\n🚌 Toute l'équipe d'AyaleTrans vous souhaite un très bon voyage !\n\n📞 Assistance Client :\n- Tél & WhatsApp : +243974645174",
+		p.Reference, meta.PaymentType, amountStr, dateHeure, statut)
 
-	return getSession(phone)
+	SendText(jid, confirmationMsg)
+	return nil
 }
+func StartPaymentTimeoutWorker() {
+	go func() {
+		ticker := time.NewTicker(10 * time.Second) // Vérifier toutes les 10 secondes
+		defer ticker.Stop()
+		cleanupOldPendingPayments()
 
-// extractPhoneFromMetadata extracts phone number from metadata JSON string
-func extractPhoneFromMetadata(metadataJSON string) string {
-	if metadataJSON == "" {
-		return ""
-	}
+		for {
+			select {
+			case <-ticker.C:
+				// Récupérer tous les paiements en attente depuis plus de 300 secondes
+				var expiredPayments []payments.Payment
+				err := DB.Select(&expiredPayments, `
+					SELECT * FROM payments
+					WHERE status = $1
+					AND created_at < NOW() - INTERVAL '300 seconds'
+					ORDER BY created_at
+					LIMIT 50
+				`, payments.StatusPending)
 
-	var pendingMeta PendingBookingMetadata
-	if err := json.Unmarshal([]byte(metadataJSON), &pendingMeta); err != nil {
-		return ""
-	}
+				if err != nil {
+					log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la recherche des paiements expirés: %v", err)
+					continue
+				}
 
-	if pendingMeta.RecipientJID != "" {
-		// Extract phone from JID (format: 243xxxxxxxxx@s.whatsapp.net)
-		jidStr := strings.TrimSpace(pendingMeta.RecipientJID)
-		if atIdx := strings.Index(jidStr, "@"); atIdx > 0 {
-			return jidStr[:atIdx]
+				// Traiter chaque paiement expiré
+				for _, payment := range expiredPayments {
+					log.Printf("[PAYMENT TIMEOUT WORKER] Traitement du paiement expiré: %s", payment.Reference)
+
+					// Double-check that payment is still pending before processing
+					var currentStatus string
+					err := DB.Get(&currentStatus, `SELECT status FROM payments WHERE id = $1`, payment.ID)
+					if err != nil || currentStatus != payments.StatusPending {
+						log.Printf("[PAYMENT TIMEOUT WORKER] Payment %s is no longer pending (status: %s), skipping", payment.Reference, currentStatus)
+						continue
+					}
+
+					// Update payment status to expired
+					var result sql.Result
+
+					if payment.OrderNumber.Valid {
+						result, err = DB.Exec(
+							"UPDATE payments SET status = $1, callback_data = $2, updated_at = NOW() WHERE order_number = $3 AND status = $4",
+							payments.StatusExpired, "", payment.OrderNumber.String, payments.StatusPending,
+						)
+					} else {
+						// Fallback: update by ID if OrderNumber is not valid
+						result, err = DB.Exec(
+							"UPDATE payments SET status = $1, callback_data = $2, updated_at = NOW() WHERE id = $3 AND status = $4",
+							payments.StatusExpired, "", payment.ID, payments.StatusPending,
+						)
+					}
+
+					if err != nil {
+						log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la mise à jour du statut en expiré pour la référence %s: %v", payment.Reference, err)
+						continue
+					}
+
+					rowsAffected, err := result.RowsAffected()
+					if err != nil {
+						log.Printf("[PAYMENT TIMEOUT WORKER] Erreur lors de la récupération du nombre de lignes affectées: %v", err)
+						continue
+					}
+					if rowsAffected == 0 {
+						log.Printf("[PAYMENT TIMEOUT WORKER] Paiement %s n'est plus en statut pending (déjà traité)", payment.Reference)
+						continue
+					}
+
+					// Database update successful, now attempt to send expiration message with fallback
+					handlePaymentExpiration(payment.Reference, payment.OrderNumber.String)
+				}
+			}
 		}
-	}
-
-	return CleanPhoneNumber(pendingMeta.GuestPhone)
+	}()
 }

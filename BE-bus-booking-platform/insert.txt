@@ -1,0 +1,91 @@
+		case StepMyTicketsList:
+			// Handle ticket selection from the list
+			idx, err := strconv.Atoi(text)
+			if err != nil || idx < 1 {
+				return "Numéro de billet invalide. Veuillez entrer un numéro valide."
+			}
+			// Get tickets again to check bounds and get the selected ticket
+			tickets, err = GetTicketsByPhone(s.UserPhone)
+			if err != nil {
+				s.PaymentError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			if idx > len(tickets) {
+				return fmt.Sprintf("Numéro de billet invalide. Veuillez entrer un numéro entre 1 et %d.", len(tickets))
+			}
+			selectedTicket := tickets[idx-1]
+
+			// Fetch additional ticket details
+			ticketDetail, err := GetTicketDetailsByDownloadToken(selectedTicket.DownloadToken)
+			if err != nil {
+				s.PaymentError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var journey models.Journey
+			if err := DB.Get(&journey, `
+				SELECT
+					id,
+					organization_id,
+					route_id,
+					bus_id,
+					departure_date::text,
+					departure_time::text,
+					arrival_date::text,
+					arrival_time::text,
+					status,
+					created_at,
+					updated_at
+				FROM journeys WHERE id=$1`, ticketDetail.JourneyID); err != nil {
+				s.PaymentError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var route models.Route
+			if err := DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, journey.RouteID); err != nil {
+				// If we can't fetch route, set defaults
+				route.Origin = "Inconnu"
+				route.Destination = "Inconnu"
+			}
+			var paymentValidated bool
+			if err := DB.Get(&paymentValidated, `SELECT payment_validated FROM tickets WHERE download_token=$1`, selectedTicket.DownloadToken); err != nil {
+				s.PaymentError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var ticketStatus string
+			if err := DB.Get(&ticketStatus, `SELECT status FROM tickets WHERE download_token=$1`, selectedTicket.DownloadToken); err != nil {
+				s.PaymentError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Determine status message
+			var statusMsg string
+			if ticketStatus == "checked_in" {
+				statusMsg = "En embarquement"
+			} else if paymentValidated {
+				statusMsg = "Payé"
+			} else {
+				statusMsg = "En attente de paiement"
+			}
+
+			// Format date and time of journey
+			depDate := formatDate(journey.DepartureDate)
+			depTime := formatTime(journey.DepartureTime)
+			arrDate := formatDate(journey.ArrivalDate)
+			arrTime := formatTime(journey.ArrivalTime)
+
+			// Build detailed message
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("🎫 Détails du billet %d\n\n", idx))
+			b.WriteString(fmt.Sprintf("Statut : %s\n", statusMsg))
+			b.WriteString(fmt.Sprintf("Voyage : %s → %s\n", route.Origin, route.Destination))
+			b.WriteString(fmt.Sprintf("Date & Heure de départ : %s à %s\n", depDate, depTime))
+			b.WriteString(fmt.Sprintf("Date & Heure d'arrivée : %s à %s\n", arrDate, arrTime))
+			b.WriteString(fmt.Sprintf("Passager : %s\n", selectedTicket.PassengerName))
+			b.WriteString(fmt.Sprintf("Siège : %s\n", selectedTicket.SeatNumber))
+			b.WriteString(fmt.Sprintf("Prix : %.2f USD\n", selectedTicket.Price))
+			b.WriteString(fmt.Sprintf("Télécharger : %s\n\n", selectedTicket.DownloadURL))
+			b.WriteString("Tapez *menu* pour retourner au menu principal.")

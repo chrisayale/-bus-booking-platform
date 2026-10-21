@@ -1,0 +1,320 @@
+		case StepVerificationMenu:
+			// Handle verification menu options
+			switch text {
+			case "1":
+				// Voir mes billets - use phone number directly
+				s.PreviousStep = s.Step
+				log.Printf("[DEBUG] GetTicketsByPhone called with phone number: %s", s.UserPhone)
+				tickets, err := GetTicketsByPhone(s.UserPhone)
+				if err != nil {
+					s.PaymentError = err.Error()
+					log.Printf("[ERROR] GetTicketsByPhone failed: %v", err)
+					return "Erreur lors de la récupération des billets. Veuillez réessayer ou tapez *menu* pour retourner au menu principal."
+				}
+				if len(tickets) == 0 {
+					return "Aucun billet trouvé pour ce numéro de téléphone.\n\nTapez *menu* pour retourner au menu principal."
+				}
+				s.Step = StepMyTicketsList
+				return formatMyTickets(tickets) + "\n\nTapez le numéro du billet à sélectionner :"
+			case "2":
+				// Guichet Contrôleur
+				s.PreviousStep = s.Step
+				s.Step = StepControllerInput
+				return getPromptForStep(s)
+			case "3":
+				// Retour au menu principal
+				s.Step = StepMenu
+				return welcomeMenu
+			default:
+				return "Choix invalide. Veuillez sélectionner 1, 2 ou 3."
+			}
+		case StepControllerInput:
+			// Prompt for ticket reference/token
+			if strings.TrimSpace(text) == "" {
+				return "Veuillez entrer la référence du billet ou le token de téléchargement :"
+			}
+			// Store the token and proceed to controller actions
+			s.PaymentPhone = strings.TrimSpace(text) // Reusing PaymentPhone field to store ticket token
+			s.PreviousStep = s.Step
+			s.Step = StepControllerActions
+			return getPromptForStep(s)
+		case StepControllerActions:
+			// Controller business logic
+			if s.PaymentPhone == "" {
+				// No token provided, go back to input
+				s.Step = StepControllerInput
+				return getPromptForStep(s)
+			}
+
+			// Handle user selection of options
+			if text == "1" || text == "2" {
+				// Get ticket details using the stored token
+				ticketDetail, err := GetTicketDetailsByDownloadToken(s.PaymentPhone)
+				if err != nil {
+					s.PaymentError = err.Error()
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				// Get journey and organization details
+				var journey models.Journey
+				if err := DB.Get(&journey, `SELECT * FROM journeys WHERE id=$1`, ticketDetail.JourneyID); err != nil {
+					s.PaymentError = "Erreur lors de la récupération du voyage"
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				var organization models.Organization
+				if err := DB.Get(&organization, `SELECT * FROM organizations WHERE id=$1`, ticketDetail.OrganizationID); err != nil {
+					s.PaymentError = "Erreur lors de la récupération de l'agence"
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				// Check if ticket exists and get its current status
+				var ticketExists bool
+				err = DB.Get(&ticketExists, `SELECT EXISTS(SELECT 1 FROM tickets WHERE download_token=$1)`, s.PaymentPhone)
+				if err != nil || !ticketExists {
+					return "Billet introuvable. Veuillez vérifier la référence du billet et réessayer."
+				}
+
+				// Get ticket status
+				var paymentValidated bool
+				var status string
+				err = DB.Get(&status, `SELECT status FROM tickets WHERE download_token=$1`, s.PaymentPhone)
+				if err != nil {
+					s.PaymentError = "Erreur lors de la vérification du statut de paiement"
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				err = DB.Get(&status, `SELECT status FROM tickets WHERE download_token=$1`, s.PaymentPhone)
+				if err != nil {
+					s.PacketError = "Erreur lors de la récupération du statut du billet"
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				// Get route details for origin and destination
+				var route models.Route
+				if err := DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, journey.RouteID); err != nil {
+					s.PacketError = "Erreur lors de la récupération de l'itinéraire"
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+
+				// Handle option selection
+				if text == "1" {
+					if paymentValidated {
+						// Option 1: Valider l'embarquement (check-in) for paid tickets
+						err = UpdateTicketCheckinStatus(s.PaymentPhone)
+						if err != nil {
+							s.PacketError = "Erreur lors de la validation de l'embarquement: " + err.Error()
+							s.Step = StepMenu
+							return welcomeMenu
+						}
+						// Show success message and return to main menu
+						s.Step = StepMenu
+						return fmt.Sprintf("✅ Embarquement validé avec succès !\n\n🎫 Voyage : %s → %s\n📅 Date : %s\n🕒 Heure : %s\n🏢 Agence : %s\n\nTapez *menu* pour retourner au menu principal.",
+							route.Origin, route.Destination, journey.DepartureDate, journey.DepartureTime, organization.Name)
+					} else {
+						// Option 1: Valider le paiement cash for unpaid tickets
+						err = UpdateTicketPaymentStatus(s.PaymentPhone)
+						if err != nil {
+							s.PacketError = "Erreur lors de la validation du paiement: " + err.Error()
+							s.Step = StepMenu
+							return welcomeMenu
+						}
+						// Show success message and return to main menu
+						s.Step = StepMenu
+						return fmt.Sprintf("✅ Paiement cash validé avec succès ! Le billet est maintenant prêt pour l'embarquement.\n\n🎫 Voyage : %s → %s\n�5 Date : %s\n🕒 Heure : %s\n🏢 Agence : %s\n\nTapez *menu* pour retourner au menu principal.",
+							route.Origin, route.Destination, journey.DepartureDate, journey.DepartureTime, organization.Name)
+					}
+				} else if text == "2" {
+					// Option 2: Retour au menu principal
+					s.Step = StepMenu
+					return welcomeMenu
+				}
+			}
+
+			// If we reach here, either no valid option was selected or we need to show the initial message
+			if s.PaymentPhone == "" {
+				// No token provided, go back to input
+				s.Step = StepControllerInput
+				return getPromptForStep(s)
+			}
+
+			// Get ticket details using the stored token
+			ticketDetail, err = GetTicketDetailsByDownloadToken(s.PaymentPhone)
+			if err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Get journey and organization details
+			var journey models.Journey
+			if err := DB.Get(&journey, `SELECT * FROM journeys WHERE id=$1`, ticketDetail.JourneyID); err != nil {
+				s.PacketError = "Erreur lors de la récupération du voyage"
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			var organization models.Organization
+			if err := DB.Get(&organization, `SELECT * FROM organizations WHERE id=$1`, ticketDetail.OrganizationID); err != nil {
+				s.PacketError = "Erreur lors de la récupération de l'agence"
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Check if ticket exists and get its current status
+			var ticketExists bool
+			err = DB.Get(&ticketExists, `SELECT EXISTS(SELECT 1 FROM tickets WHERE download_token=$1)`, s.PaymentPhone)
+			if err != nil || !ticketExists {
+				return "Billet introuvable. Veuillez vérifier la référence du billet et réessayer."
+			}
+
+			// Get ticket status
+			var paymentValidated bool
+			var status string
+			err = DB.Get(&status, `SELECT status FROM tickets WHERE download_token=$1`, s.PaymentPhone)
+			if err != nil {
+				s.PacketError = "Erreur lors de la vérification du statut de paiement"
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			err = DB.Get(&status, `SELECT status FROM tickets WHERE download_token=$1`, s.PaymentPhone)
+			if err != nil {
+				s.PacketError = "Erreur lors de la récupération du statut du billet"
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Get route details for origin and destination
+			var route models.Route
+			if err := DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, journey.RouteID); err != nil {
+				s.PacketError = "Erreur lors de la récupération de l'itinéraire"
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Build ticket details message
+			var detailsMsg string
+			if paymentValidated {
+				detailsMsg = fmt.Sprintf("✅ Billet valide\n\n🎫 Voyage : %s → %s\n📅 Date : %s\n🕒 Heure : %s\n🏢 Agence : %s\n💰 Statut : Paiement validé\n\n🔧 Opérations disponibles :\n1️⃣ Valider l'embarquement (check-in)\n2️⃣ Retour au menu principal",
+					route.Origin, route.Destination, journey.DepartureDate, journey.DepartureTime, organization.Name)
+			} else {
+				detailsMsg = fmt.Sprintf("⏳ Billet en attente de paiement\n\n🎫 Voyage : %s → %s\n�5 Date : %s\n🕒 Heure : %s\n🏢 Agence : %s\n💰 Statut : Paiement en attente\n\n🔧 Opérations disponibles :\n1️⃣ Valider le paiement cash\n2️⃣ Retour au menu principal",
+					route.Origin, route.Destination, journey.DepartureDate, journey.DepartureTime, organization.Name)
+			}
+
+			return detailsMsg + "\n\nChoisissez une option :"
+		case StepCurrencyChoice:
+			switch text {
+			case "1":
+				s.Currency = "USD"
+				s.PreviousStep = s.Step
+				s.Step = StepPhonePaymentChoice
+				return getPromptForStep(s)
+			case "2":
+				s.Currency = "CDF"
+				s.PreviousStep = s.Step
+				s.Step = StepPhonePaymentChoice
+				return getPromptForStep(s)
+			default:
+				return "Choix invalide. Répondez avec le numéro de votre choix."
+			}
+		case StepMyTicketsPhone:
+			return "📱 Entrez le numéro de téléphone pour chercher vos billets :"
+		case StepMyTicketsList:
+			// Handle ticket selection from the list
+			idx, err := strconv.Atoi(text)
+			if err != nil || idx < 1 {
+				return "Numéro de billet invalide. Veuillez entrer un numéro valide."
+			}
+			// Get tickets again to check bounds and get the selected ticket
+			tickets, err = GetTicketsByPhone(s.UserPhone)
+			if err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			if idx > len(tickets) {
+				return fmt.Sprintf("Numéro de billet invalide. Veuillez entrer un numéro entre 1 et %d.", len(tickets))
+			}
+			selectedTicket := tickets[idx-1]
+
+			// Fetch additional ticket details
+			ticketDetail, err := GetTicketDetailsByDownloadToken(selectedTicket.DownloadToken)
+			if err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var journey models.Journey
+			if err := DB.Get(&journey, `
+				SELECT
+					id,
+					organization_id,
+					route_id,
+					bus_id,
+					departure_date::text,
+					departure_time::text,
+					arrival_date::text,
+					arrival_time::text,
+					status,
+					created_at,
+					updated_at
+				FROM journeys WHERE id=$1`, ticketDetail.JourneyID); err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var route models.Route
+			if err := DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, journey.RouteID); err != nil {
+				// If we can't fetch route, set defaults
+				route.Origin = "Inconnu"
+				route.Destination = "Inconnu"
+			}
+			var paymentValidated bool
+			if err := DB.Get(&paymentValidated, `SELECT payment_validated FROM tickets WHERE download_token=$1`, selectedTicket.DownloadToken); err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+			var ticketStatus string
+			if err := DB.Get(&ticketStatus, `SELECT status FROM tickets WHERE download_token=$1`, selectedTicket.DownloadToken); err != nil {
+				s.PacketError = err.Error()
+				s.Step = StepMenu
+				return welcomeMenu
+			}
+
+			// Determine status message
+			var statusMsg string
+			if ticketStatus == "checked_in" {
+				statusMsg = "En embarquement"
+			} else if paymentValidated {
+				statusMsg = "Payé"
+			} else {
+				statusMsg = "En attente de paiement"
+			}
+
+			// Format date and time of journey
+			depDate := formatDate(journey.DepartureDate)
+			depTime := formatTime(journey.DepartureTime)
+			arrDate := formatDate(journey.ArrivalDate)
+			arrTime := formatTime(journey.ArrivalTime)
+
+			// Build detailed message
+			var b strings.Builder
+			b.WriteString(fmt.Sprintf("🎫 Détails du billet %d\n\n", idx))
+			b.WriteString(fmt.Sprintf("Statut : %s\n", statusMsg))
+			b.WriteString(fmt.Sprintf("Voyage : %s → %s\n", route.Origin, route.Destination))
+			b.WriteString(fmt.Sprintf("Date & Heure de départ : %s à %s\n", depDate, depTime))
+			b.WriteString(fmt.Sprintf("Date & Heure d'arrivée : %s à %s\n", arrDate, arrTime))
+			b.WriteString(fmt.Sprintf("Passager : %s\n", selectedTicket.PassengerName))
+			b.WriteString(fmt.Sprintf("Siège : %s\n", selectedTicket.SeatNumber))
+			b.WriteString(fmt.Sprintf("Prix : %.2f USD\n", selectedTicket.Price))
+			b.WriteString(fmt.Sprintf("Télécharger : %s\n\n", selectedTicket.DownloadURL))
+			b.WriteString("Tapez *menu* pour retourner au menu principal.")

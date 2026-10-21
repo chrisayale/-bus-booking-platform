@@ -8,6 +8,7 @@ import (
 	"testing"
 	"time"
 
+	"github.com/bus-booking/BE-bus-booking-platform/internal/models"
 	"github.com/jmoiron/sqlx"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
@@ -207,7 +208,7 @@ func (m *mockDB) QueryRowx(query string, args ...interface{}) *sqlx.Row {
 // We also need to mock the Scan method on the row.
 func (m *mockDB) Scan(dest ...interface{}) error {
 	// We'll assume this is for the booking ID.
-// We'll set the first argument (bookingID) to a dummy value.
+	// We'll set the first argument (bookingID) to a dummy value.
 	if len(dest) > 0 {
 		*dest.(*string) = "dummybookingid"
 	}
