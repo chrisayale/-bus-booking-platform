@@ -170,6 +170,7 @@ func (h *AdminHandler) GetUsers(c *gin.Context) {
 // @param user body models.User true "Données de l'utilisateur"
 // @success 201 {object} models.User
 // @failure 400 {object} map[string]string
+// @failure 409 {object} map[string]string
 // @failure 500 {object} map[string]string
 // @router /admin/users [post]
 func (h *AdminHandler) CreateUser(c *gin.Context) {
@@ -197,6 +198,18 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 	if count > 0 {
 		c.JSON(http.StatusConflict, gin.H{"error": "email already registered"})
 		return
+	}
+
+	// Check if phone exists (for agent/controller roles, phone must be unique)
+	if input.Phone != nil && *input.Phone != "" {
+		if err := h.DB.Get(&count, `SELECT COUNT(*) FROM users WHERE phone = $1 AND role IN ('agent', 'controller')`, *input.Phone); err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check phone"})
+			return
+		}
+		if count > 0 {
+			c.JSON(http.StatusConflict, gin.H{"error": "Ce numéro de téléphone est déjà utilisé par un autre agent."})
+			return
+		}
 	}
 
 	// Hash the password (PIN)
@@ -235,6 +248,11 @@ func (h *AdminHandler) CreateUser(c *gin.Context) {
 	var savedPin *string
 	err = row.Scan(&user.ID, &user.Email, &user.FullName, &user.Phone, &user.Role, &user.OrganizationID, &user.IsVerified, &user.IsActive, &user.CreatedAt, &user.UpdatedAt, &savedPin)
 	if err != nil {
+		// Check for unique constraint violation on phone
+		if strings.Contains(err.Error(), "unique_agent_controller_phone") || strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Ce numéro de téléphone est déjà utilisé par un autre agent."})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user: " + err.Error()})
 		return
 	}
@@ -332,6 +350,7 @@ func (h *AdminHandler) GetUserById(c *gin.Context) {
 // @success 200 {object} models.User
 // @failure 400 {object} map[string]string
 // @failure 404 {object} map[string]string
+// @failure 409 {object} map[string]string
 // @failure 500 {object} map[string]string
 // @router /admin/users/{id} [put]
 func (h *AdminHandler) UpdateUser(c *gin.Context) {
@@ -353,7 +372,7 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 
 	// Check if user exists
 	var existingUser models.User
-	err := h.DB.Get(&existingUser, `SELECT id FROM users WHERE id = $1`, userID)
+	err := h.DB.Get(&existingUser, `SELECT id, role, phone FROM users WHERE id = $1`, userID)
 	if err != nil {
 		if err == sql.ErrNoRows {
 			c.JSON(http.StatusNotFound, gin.H{"error": "utilisateur non trouvé"})
@@ -361,6 +380,26 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check user: " + err.Error()})
 		}
 		return
+	}
+
+	// Check phone uniqueness if phone is being updated for agent/controller
+	if input.Phone != nil && *input.Phone != "" {
+		// Check if the new phone is different from current
+		var currentPhone string
+		if existingUser.Phone != nil {
+			currentPhone = *existingUser.Phone
+		}
+		if *input.Phone != currentPhone {
+			var count int
+			if err := h.DB.Get(&count, `SELECT COUNT(*) FROM users WHERE phone = $1 AND role IN ('agent', 'controller') AND id != $2`, *input.Phone, userID); err != nil {
+				c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check phone"})
+				return
+			}
+			if count > 0 {
+				c.JSON(http.StatusConflict, gin.H{"error": "Ce numéro de téléphone est déjà utilisé par un autre agent."})
+				return
+			}
+		}
 	}
 
 	// Start transaction
@@ -389,6 +428,11 @@ func (h *AdminHandler) UpdateUser(c *gin.Context) {
 		WHERE id = $5
 	`, input.FullName, phoneNull, input.Role, input.IsActive, userID)
 	if err != nil {
+		// Check for unique constraint violation on phone
+		if strings.Contains(err.Error(), "unique_agent_controller_phone") || strings.Contains(err.Error(), "duplicate key value violates unique constraint") {
+			c.JSON(http.StatusConflict, gin.H{"error": "Ce numéro de téléphone est déjà utilisé par un autre agent."})
+			return
+		}
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user: " + err.Error()})
 		return
 	}
