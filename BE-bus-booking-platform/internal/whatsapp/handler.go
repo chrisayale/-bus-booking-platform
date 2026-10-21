@@ -1618,7 +1618,7 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			return getPromptForStep(s)
 		case "2", "2️⃣": // Faire le check-in
 			s.PreviousStep = s.Step
-			s.Step = StepControllerCheckInConfirm
+			s.Step = StepControllerDoCheckin
 			return getPromptForStep(s)
 		default:
 			return "Choix invalide. Veuillez sélectionner 1 pour valider le paiement ou 2 pour faire le check-in, or tapez *menu* pour retourner au menu principal."
@@ -1923,12 +1923,22 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
 			}
 
-			// Update ticket status to checked_in
+			// Update ticket status to checked_in with guard condition on booking status
 			var err error
 			if ticketID != "" {
-				_, err = DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1 OR qr_token = $2`, bookingID, ticketID)
+				_, err = DB.Exec(`
+					UPDATE tickets
+					SET status = 'checked_in', checked_in_at = NOW()
+					WHERE (booking_id = $1 OR qr_token = $2)
+					AND booking_id IN (SELECT id FROM bookings WHERE status = 'confirmed')`,
+					bookingID, ticketID)
 			} else {
-				_, err = DB.Exec(`UPDATE tickets SET status = 'checked_in', checked_in_at = NOW() WHERE booking_id = $1`, bookingID)
+				_, err = DB.Exec(`
+					UPDATE tickets
+					SET status = 'checked_in', checked_in_at = NOW()
+					WHERE booking_id = $1
+					AND booking_id IN (SELECT id FROM bookings WHERE status = 'confirmed')`,
+					bookingID)
 			}
 			if err != nil {
 				return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
