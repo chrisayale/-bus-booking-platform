@@ -2,7 +2,7 @@ import { useEffect, useState } from "react"
 import { useSelector } from "react-redux"
 import { api } from "../../api/client"
 import { useTranslate } from "../../hooks/useTranslate"
-import { Shield, Mail, User, Lock, Phone, Plus, X, Trash2, AlertTriangle } from "lucide-react"
+import { Shield, Mail, User, Lock, Phone, Plus, X, Trash2, AlertTriangle, ToggleLeft, ToggleRight, Loader2 } from "lucide-react"
 import type { User as UserType } from "../../types"
 import type { RootState } from "../../store"
 
@@ -21,6 +21,7 @@ export default function Admins() {
   const [success, setSuccess] = useState<string | null>(null)
   const [deletingId, setDeletingId] = useState<string | null>(null)
   const [confirmDelete, setConfirmDelete] = useState<string | null>(null)
+  const [togglingId, setTogglingId] = useState<string | null>(null)
 
   const fetchAdmins = async () => {
     try {
@@ -52,6 +53,22 @@ export default function Admins() {
       setError((err as Error).message)
     } finally {
       setDeletingId(null)
+    }
+  }
+
+  const handleToggleStatus = async (admin: UserType) => {
+    setTogglingId(admin.id)
+    setError(null)
+    setSuccess(null)
+    try {
+      const newStatus = !admin.isActive
+      await api.put(`/admin/users/${admin.id}/status`, { is_active: newStatus })
+      setSuccess(`Utilisateur ${newStatus ? "activé" : "désactivé"} avec succès`)
+      fetchAdmins()
+    } catch (err) {
+      setError((err as Error).message)
+    } finally {
+      setTogglingId(null)
     }
   }
 
@@ -255,15 +272,37 @@ export default function Admins() {
                     {admin.phone && (
                       <span className="text-xs text-gray-400 hidden sm:inline">{admin.phone}</span>
                     )}
-                    <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-full font-medium">Admin</span>
+                    <span className="text-xs bg-blue-50 text-blue-700 px-2 py-1 rounded-full font-medium">{admin.role}</span>
+                    {/* Status badge */}
+                    <span className={`text-xs px-2 py-1 rounded-full font-medium ${
+                      admin.isActive ? 'bg-green-50 text-green-700' : 'bg-red-50 text-red-700'
+                    }`}>
+                      {admin.isActive ? 'Actif' : 'Inactif'}
+                    </span>
                     {!isSelf && (
-                      <button
-                        onClick={() => setConfirmDelete(admin.id)}
-                        className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition"
-                        title={`Remove ${admin.full_name}`}
-                      >
-                        <Trash2 className="h-4 w-4" />
-                      </button>
+                      <>
+                        <button
+                          onClick={() => handleToggleStatus(admin)}
+                          disabled={togglingId === admin.id}
+                          className="p-1.5 text-gray-400 hover:text-green-600 hover:bg-green-50 rounded-lg transition disabled:opacity-50"
+                          title={admin.isActive ? `Désactiver ${admin.full_name}` : `Activer ${admin.full_name}`}
+                        >
+                          {togglingId === admin.id ? (
+                            <Loader2 className="h-4 w-4 animate-spin" />
+                          ) : admin.isActive ? (
+                            <ToggleRight className="h-4 w-4" />
+                          ) : (
+                            <ToggleLeft className="h-4 w-4" />
+                          )}
+                        </button>
+                        <button
+                          onClick={() => setConfirmDelete(admin.id)}
+                          className="p-1.5 text-gray-400 hover:text-red-500 hover:bg-red-50 rounded-lg transition"
+                          title={`Remove ${admin.full_name}`}
+                        >
+                          <Trash2 className="h-4 w-4" />
+                        </button>
+                      </>
                     )}
                   </div>
                 </div>

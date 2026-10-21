@@ -500,6 +500,83 @@ func (h *AdminHandler) DeleteUser(c *gin.Context) {
 	c.JSON(http.StatusOK, gin.H{"message": "utilisateur supprimé avec succès"})
 }
 
+// ToggleUserStatus godoc
+// @Summary Active ou désactive un utilisateur (agent/controller)
+// @description Permet au Super Admin d'activer ou désactiver un agent ou un controller
+// @id toggle-user-status
+// @tags admin
+// @accept json
+// @produce json
+// @param id path string true "ID de l'utilisateur"
+// @param status body map[string]bool true "Nouveau statut actif/inactif"
+// @success 200 {object} map[string]interface{}
+// @failure 400 {object} map[string]string
+// @failure 404 {object} map[string]string
+// @failure 500 {object} map[string]string
+// @router /admin/users/{id}/status [put]
+func (h *AdminHandler) ToggleUserStatus(c *gin.Context) {
+	userID := c.Param("id")
+
+	var payload struct {
+		IsActive bool `json:"is_active" binding:"required"`
+	}
+	if err := c.ShouldBindJSON(&payload); err != nil {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Payload invalide: " + err.Error()})
+		return
+	}
+
+	// Check if user exists and is agent or controller
+	var existingUser models.User
+	err := h.DB.Get(&existingUser, `SELECT id, role FROM users WHERE id = $1`, userID)
+	if err != nil {
+		if err == sql.ErrNoRows {
+			c.JSON(http.StatusNotFound, gin.H{"error": "utilisateur non trouvé"})
+		} else {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to check user: " + err.Error()})
+		}
+		return
+	}
+
+	// Only allow toggling status for agents and controllers
+	if existingUser.Role != "agent" && existingUser.Role != "controller" {
+		c.JSON(http.StatusBadRequest, gin.H{"error": "Cette action n'est autorisée que pour les agents et controllers"})
+		return
+	}
+
+	// Update user status
+	_, err = h.DB.Exec(`UPDATE users SET is_active = $1, updated_at = NOW() WHERE id = $2`, payload.IsActive, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update user status: " + err.Error()})
+		return
+	}
+
+	// Fetch updated user
+	var user models.User
+	err = h.DB.Get(&user, `
+		SELECT id, email, full_name, phone, role, organization_id, is_active, is_verified, created_at, updated_at, pin
+		FROM users WHERE id = $1
+	`, userID)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to fetch updated user: " + err.Error()})
+		return
+	}
+
+	// Fetch organizations
+	var orgs []models.Organization
+	h.DB.Select(&orgs, `
+		SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
+		FROM organizations o
+		JOIN user_organizations uo ON o.id = uo.organization_id
+		WHERE uo.user_id = $1
+	`, userID)
+	user.Organizations = orgs
+
+	c.JSON(http.StatusOK, gin.H{
+		"message": fmt.Sprintf("Utilisateur %s avec succès", map[bool]string{true: "activé", false: "désactivé"}[payload.IsActive]),
+		"user":    user,
+	})
+}
+
 // Helper function to convert nil string to empty string for JSON serialization
 func NullString(s *string) string {
 	if s == nil {

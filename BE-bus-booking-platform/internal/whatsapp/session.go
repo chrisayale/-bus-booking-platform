@@ -69,6 +69,16 @@ const (
 	StepControllerPaymentReferenceInput Step = "controller_payment_reference_input"
 	StepControllerCheckInConfirm      Step = "controller_checkin_confirm"
 	StepControllerCheckInProcess      Step = "controller_checkin_process"
+	// Controller PIN authentication flow (new)
+	StepControllerEnterPin            Step = "controller_enter_pin"
+	StepControllerSelectAction        Step = "controller_select_action"
+	StepControllerValidatePayment     Step = "controller_validate_payment"
+	StepControllerDoCheckin           Step = "controller_do_checkin"
+	// Payment validation search sub-steps
+	StepControllerSearchByRef         Step = "controller_search_by_ref"
+	StepControllerSearchByPhone       Step = "controller_search_by_phone"
+	StepControllerSearchByName        Step = "controller_search_by_name"
+	StepControllerSearchByQR          Step = "controller_search_by_qr"
 )
 
 type Agency struct {

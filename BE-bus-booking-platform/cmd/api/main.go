@@ -199,6 +199,7 @@ func main() {
 				users.GET("/:id", adminHandler.GetUserById)
 				users.PUT("/:id", adminHandler.UpdateUser)
 				users.DELETE("/:id", adminHandler.DeleteUser)
+				users.PUT("/:id/status", adminHandler.ToggleUserStatus)
 			}
 
 			// Placeholder for admin broadcast functionality
