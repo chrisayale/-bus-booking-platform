@@ -768,6 +768,10 @@ func (h *B2CHandler) ResetPassword(c *gin.Context) {
 
 func (h *B2CHandler) GetProfile(c *gin.Context) {
 	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing user ID"})
+		return
+	}
 	var user models.User
 	err := h.DB.Get(&user, `SELECT id, email, full_name, phone, role, is_verified, created_at FROM users WHERE id=$1`, userID)
 	if err != nil {
@@ -779,6 +783,10 @@ func (h *B2CHandler) GetProfile(c *gin.Context) {
 
 func (h *B2CHandler) UpdateProfile(c *gin.Context) {
 	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing user ID"})
+		return
+	}
 	var req struct {
 		FullName string `json:"full_name"`
 		Phone    string `json:"phone"`
@@ -802,6 +810,10 @@ func (h *B2CHandler) UpdateProfile(c *gin.Context) {
 
 func (h *B2CHandler) ChangePassword(c *gin.Context) {
 	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing user ID"})
+		return
+	}
 	var req struct {
 		CurrentPassword string `json:"current_password" binding:"required"`
 		NewPassword     string `json:"new_password" binding:"required,min=6"`
@@ -840,6 +852,10 @@ func (h *B2CHandler) ChangePassword(c *gin.Context) {
 
 func (h *B2CHandler) DeleteAccount(c *gin.Context) {
 	userID := c.GetString("user_id")
+	if userID == "" {
+		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid or missing user ID"})
+		return
+	}
 	role := c.GetString("role")
 
 	// Prevent deleting the last owner account

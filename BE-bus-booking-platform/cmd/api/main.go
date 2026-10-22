@@ -122,8 +122,12 @@ func main() {
 		// Auth GET (verify-email) - no rate limit needed
 		api.GET("/auth/verify-email", b2cHandler.VerifyEmail)
 
-		// Auth profile endpoint (alias for /api/user/profile)
-		auth.GET("/profile", b2cHandler.GetProfile)
+		// Auth profile endpoint (alias for /api/user/profile) - requires auth
+		authProfile := api.Group("/auth")
+		authProfile.Use(middleware.AuthMiddleware(cfg.JWTSecret))
+		{
+			authProfile.GET("/profile", b2cHandler.GetProfile)
+		}
 
 		// User profile routes (require auth)
 		user := api.Group("/user")
@@ -271,6 +275,8 @@ func main() {
 			platformAdmin.PUT("/pending-agencies/:id/approve", b2bHandler.ApproveAgency)
 			platformAdmin.PUT("/pending-agencies/:id/reject", b2bHandler.RejectAgency)
 			platformAdmin.PUT("/agencies/:id/active", b2bHandler.SetAgencyActive)
+			// Impersonate owner as platform admin (alias for /api/impersonate-owner/:orgId)
+			platformAdmin.POST("/agencies/:id/impersonate", b2bHandler.ImpersonateOwner)
 		}
 
 		// Admin user management (within organization)

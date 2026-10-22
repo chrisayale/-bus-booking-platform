@@ -43,8 +43,8 @@ export default function PlatformAdmin() {
   const fetchAll = async () => {
     try {
       const [pendingData, agenciesData] = await Promise.all([
-        api.get<any>("/platform/pending-agencies"),
-        api.get<any>("/platform/agencies"),
+        api.get<any>("/platform-admin/pending-agencies"),
+        api.get<any>("/platform-admin/agencies"),
       ])
       // Ensure we always set arrays to state, even if API returns non-array data
       setPending(Array.isArray(pendingData) ? pendingData : [])
@@ -104,7 +104,7 @@ export default function PlatformAdmin() {
     setError(null)
     setSuccess(null)
     try {
-      await api.post(`/platform/agencies/${id}/approve`, {})
+      await api.put(`/platform-admin/pending-agencies/${id}/approve`, {})
       setSuccess("Agence approuvée avec succès")
       fetchAll()
     } catch (err) {
@@ -119,7 +119,7 @@ export default function PlatformAdmin() {
     setError(null)
     setSuccess(null)
     try {
-      await api.post(`/platform/agencies/${id}/reject`, {})
+      await api.put(`/platform-admin/pending-agencies/${id}/reject`, {})
       setSuccess("Agence rejetée")
       fetchAll()
     } catch (err) {
@@ -134,7 +134,7 @@ export default function PlatformAdmin() {
     setError(null)
     setSuccess(null)
     try {
-      await api.patch(`/platform/agencies/${agency.id}/status`, { is_active: !agency.is_active })
+      await api.put(`/platform-admin/agencies/${agency.id}/active`, { is_active: !agency.is_active })
       setSuccess(agency.is_active ? "Agence désactivée" : "Agence activée")
       fetchAll()
     } catch (err) {
@@ -148,7 +148,7 @@ export default function PlatformAdmin() {
     setProcessingId(agency.id)
     setError(null)
     try {
-      const data = await api.post<{ access_token: string; refresh_token: string }>(`/platform/agencies/${agency.id}/impersonate`, {})
+      const data = await api.post<{ access_token: string; refresh_token: string }>(`/platform-admin/agencies/${agency.id}/impersonate`, {})
       setTokens(data.access_token, data.refresh_token)
       await dispatch(fetchProfile())
       navigate("/owner/dashboard")
