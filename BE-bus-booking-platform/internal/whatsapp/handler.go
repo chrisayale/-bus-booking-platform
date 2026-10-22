@@ -1,6 +1,7 @@
 package whatsapp
 
 import (
+	"bytes"
 	"context"
 	"database/sql"
 	"fmt"
@@ -11,7 +12,8 @@ import (
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/utils"
 	"github.com/jmoiron/sqlx"
-	qrcode "github.com/skip2/go-qrcode"
+	qrcodegen "github.com/skip2/go-qrcode"
+	"github.com/tuotoo/qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/proto/waE2E"
 	"go.mau.fi/whatsmeow/types"
@@ -440,14 +442,49 @@ func handleIncomingMessage(evt *events.Message) {
 		return
 	}
 
+	sender := evt.Info.Sender
+	phone := sender.User
+	session := getSession(phone)
+
+	// Check if this is an image message and we're in the controller QR code input step
+	msg := evt.Message
+	imageMsg := msg.GetImageMessage()
+	if imageMsg != nil && session.Step == StepControllerInputQRCode {
+		log.Printf("Received image message for QR code scanning from %s", phone)
+
+		// Try to extract QR code from image
+		qrContent, err := extractQRFromImage(evt)
+		if err != nil {
+			// QR code decode failed - send friendly error with fallback option
+			errorMsg := `⚠️ *Impossible de lire le QR Code sur cette photo.*
+
+Conseils :
+• Assurez-vous que la photo est bien nette et bien éclairée.
+• Vous pouvez réessayer d'envoyer une photo plus claire.
+
+💡 *Alternative rapide :*
+Tapez directement les **6 à 10 caractères de la référence** du billet (ex: BBb428a003) ou tapez *menu* pour annuler.`
+
+			saveSession(phone, session)
+			SendText(sender, errorMsg)
+			return
+		}
+
+		// QR code decoded successfully, process as text input
+		text := strings.TrimSpace(qrContent)
+		log.Printf("QR code decoded successfully for %s: %q", phone, text)
+		reply := process(phone, session, text, sender)
+		saveSession(phone, session)
+		SendText(sender, reply)
+		return
+	}
+
+	// Handle regular text messages
 	text := strings.TrimSpace(extractText(evt))
 	if text == "" {
 		return
 	}
 
-	sender := evt.Info.Sender
-	phone := sender.User
-	session := getSession(phone)
 	log.Printf("Handling message for phone %s, current step %s, text: %q", phone, session.Step, text)
 
 	reply := process(phone, session, text, sender)
@@ -1728,13 +1765,12 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		return processControllerBookingResult(s, bookingResult)
 
 	case StepControllerInputQRCode:
-		// Handle controller QR code image input
+		// Handle controller QR code image input or text fallback
 		if strings.TrimSpace(text) == "" {
-			return "📸 Veuillez **envoyer la photo / l'image du QR code** du billet :"
+			return "📸 Veuillez **envoyer la photo / l'image du QR code** du billet, ou tapez directement la référence du billet :"
 		}
 
-		// For now, we'll treat text input as a potential QR token or booking reference
-		// In a full implementation, this would handle image messages
+		// Process text input as QR token or booking reference (could be from image decode or manual entry)
 		qrInput := strings.TrimSpace(text)
 
 		// Try to find ticket by QR token
@@ -2122,6 +2158,45 @@ func extractText(evt *events.Message) string {
 	return ""
 }
 
+// extractQRFromImage downloads and decodes QR code from an image message
+// Returns the decoded QR content, or empty string if not an image or QR decode fails
+func extractQRFromImage(evt *events.Message) (string, error) {
+	msg := evt.Message
+	imageMsg := msg.GetImageMessage()
+	if imageMsg == nil {
+		return "", fmt.Errorf("not an image message")
+	}
+
+	// Download the image
+	imageData, err := Client.Download(context.Background(), imageMsg)
+	if err != nil {
+		return "", fmt.Errorf("failed to download image: %w", err)
+	}
+
+	// Decode QR code from image
+	qrContent, err := decodeQRCode(imageData)
+	if err != nil {
+		return "", fmt.Errorf("failed to decode QR code: %w", err)
+	}
+
+	return qrContent, nil
+}
+
+// decodeQRCode decodes a QR code from image data using tuotoo/qrcode
+func decodeQRCode(imageData []byte) (string, error) {
+	// Use tuotoo/qrcode to decode
+	reader := bytes.NewReader(imageData)
+	qrMatrix, err := qrcode.Decode(reader)
+	if err != nil {
+		return "", err
+	}
+	if qrMatrix == nil {
+		return "", fmt.Errorf("no QR code found in image")
+	}
+	// Return the decoded content
+	return qrMatrix.Content, nil
+}
+
 func SendText(to types.JID, text string) {
 	log.Printf("[INFO] Sending WhatsApp message to %s: %s", to, text)
 	msg := buildTextMessage(text)
@@ -2198,7 +2273,7 @@ func sendTicketCard(to types.JID, ref string, j JourneyResult, t CreatedTicket) 
 }
 
 func sendTicketImage(to types.JID, t CreatedTicket) {
-	qrPNG, err := qrcode.Encode(t.QRToken, qrcode.Medium, 400)
+	qrPNG, err := qrcodegen.Encode(t.QRToken, qrcodegen.Medium, 400)
 	if err != nil {
 		return
 	}
