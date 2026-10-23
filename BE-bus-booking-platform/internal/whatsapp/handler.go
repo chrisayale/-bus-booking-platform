@@ -21,8 +21,6 @@ import (
 	"google.golang.org/protobuf/proto"
 )
 
-// THIS IS A TEST TO SEE IF THE FILE IS BEING UPDATED CORRECTLY
-
 const welcomeMenu = `Bienvenue sur GUV (Guichet unique des voyages) 🚌
 
 1️⃣ Recherche directe de voyages

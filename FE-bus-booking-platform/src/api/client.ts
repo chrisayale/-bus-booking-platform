@@ -7,8 +7,9 @@ const getBaseUrl = (): string => {
   const envUrl = import.meta.env.VITE_API_URL
   if (envUrl && envUrl.trim() !== "") {
     // Production: use the full backend URL (e.g., https://ayaletrans.onrender.com)
-    // Ensure no trailing slash
-    return envUrl.replace(/\/+$/, "")
+    // Ensure no trailing slash, and append /api prefix (backend routes are under /api)
+    const cleanUrl = envUrl.replace(/\/+$/, "")
+    return cleanUrl.endsWith("/api") ? cleanUrl : `${cleanUrl}/api`
   }
   // Development: use Vite proxy at /api which forwards to http://localhost:8080
   return "/api"
