@@ -16,6 +16,7 @@ export default function Admins() {
   const [password, setPassword] = useState("")
   const [fullName, setFullName] = useState("")
   const [phone, setPhone] = useState("")
+  const [role, setRole] = useState<"agent" | "controller">("agent")
   const [creating, setCreating] = useState(false)
   const [error, setError] = useState<string | null>(null)
   const [success, setSuccess] = useState<string | null>(null)
@@ -84,12 +85,14 @@ export default function Admins() {
         password,
         full_name: fullName,
         phone: phone || undefined,
+        role,
       })
       setSuccess("Admin account created successfully!")
       setEmail("")
       setPassword("")
       setFullName("")
       setPhone("")
+      setRole("agent")
       setShowCreateForm(false)
       fetchAdmins()
     } catch (err) {
@@ -192,6 +195,21 @@ export default function Admins() {
                   className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
                   placeholder="+212 6XX XXX XXX"
                 />
+              </div>
+            </div>
+
+            <div>
+              <label className="text-sm font-medium text-gray-700">Role</label>
+              <div className="relative mt-1">
+                <Shield className="absolute left-3 top-1/2 -translate-y-1/2 h-4 w-4 text-gray-400" />
+                <select
+                  value={role}
+                  onChange={(e) => setRole(e.target.value as "agent" | "controller")}
+                  className="w-full pl-10 pr-4 py-2.5 border border-gray-300 rounded-lg focus:ring-2 focus:ring-blue-500 focus:border-transparent outline-none"
+                >
+                  <option value="agent">Agent</option>
+                  <option value="controller">Controller</option>
+                </select>
               </div>
             </div>
 

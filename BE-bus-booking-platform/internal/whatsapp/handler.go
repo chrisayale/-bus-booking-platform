@@ -93,8 +93,24 @@ type controllerPINResult struct {
 	AgencyName string `db:"agency_name"`
 }
 
-func verifyControllerPIN(phone string, pin string) *controllerPINResult {
+// verifyControllerPINWithSender verifies a controller/agent PIN using the raw sender JID
+// with flexible matching: exact phone, phone suffix, or digits-only
+func verifyControllerPINWithSender(sender types.JID, pin string) *controllerPINResult {
 	var res controllerPINResult
+
+	// Extract potential identifiers from sender
+	rawUser := sender.User
+	normalizedRaw := strings.TrimPrefix(rawUser, "+")
+	// Extract only digits for flexible matching
+	digitsOnly := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, normalizedRaw)
+
+	// Try multiple matching strategies in order of preference
+	// 1. Exact phone match (normalized)
 	err := DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
@@ -103,16 +119,75 @@ func verifyControllerPIN(phone string, pin string) *controllerPINResult {
 		FROM users u
 		LEFT JOIN organizations o ON u.organization_id = o.id
 		WHERE u.pin = $1 AND u.is_active = true
-	`, pin)
-	if err != nil {
-		return nil
+		  AND REPLACE(u.phone, '+', '') = $2
+		  AND u.role IN ('controller', 'agent')
+	`, pin, normalizedRaw)
+	if err == nil {
+		return &res
 	}
-	return &res
+
+	// 2. Suffix match (last 9-12 digits) - handles LID vs phone format differences
+	if len(digitsOnly) >= 9 {
+		err = DB.Get(&res, `
+			SELECT
+				u.id AS user_id,
+				COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+				COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+			FROM users u
+			LEFT JOIN organizations o ON u.organization_id = o.id
+			WHERE u.pin = $1 AND u.is_active = true
+			  AND REPLACE(u.phone, '+', '') LIKE '%' || $2
+			  AND u.role IN ('controller', 'agent')
+		`, pin, digitsOnly[len(digitsOnly)-9:]) // Match last 9 digits
+		if err == nil {
+			log.Printf("Controller/agent authenticated via suffix match (sender: %s)", rawUser)
+			return &res
+		}
+	}
+
+	// 3. Digits-only match (full digits comparison)
+	if len(digitsOnly) > 0 {
+		err = DB.Get(&res, `
+			SELECT
+				u.id AS user_id,
+				COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+				COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+			FROM users u
+			LEFT JOIN organizations o ON u.organization_id = o.id
+			WHERE u.pin = $1 AND u.is_active = true
+			  AND REGEXP_REPLACE(u.phone, '\D', '', 'g') = $2
+			  AND u.role IN ('controller', 'agent')
+		`, pin, digitsOnly)
+		if err == nil {
+			log.Printf("Controller/agent authenticated via digits-only match (sender: %s)", rawUser)
+			return &res
+		}
+	}
+
+	// 4. Fallback: PIN-only match (last resort for unresolved LIDs)
+	err = DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent')
+	`, pin)
+	if err == nil {
+		log.Printf("Controller/agent authenticated via PIN fallback (sender: %s)", rawUser)
+		return &res
+	}
+
+	return nil
 }
 
-// verifyControllerPINByPin verifies a controller PIN without phone number check
-func verifyControllerPINByPin(pin string) *controllerPINResult {
+// Legacy function kept for compatibility
+func verifyControllerPIN(phone string, pin string) *controllerPINResult {
 	var res controllerPINResult
+	normalizedPhone := strings.TrimPrefix(phone, "+")
+
 	err := DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
@@ -121,12 +196,70 @@ func verifyControllerPINByPin(pin string) *controllerPINResult {
 		FROM users u
 		LEFT JOIN organizations o ON u.organization_id = o.id
 		WHERE u.pin = $1 AND u.is_active = true
-		  AND u.role IN ('controller', 'agent', 'admin', 'platform_admin')
-	`, pin)
-	if err != nil {
-		return nil
+		  AND REPLACE(u.phone, '+', '') = $2
+		  AND u.role IN ('controller', 'agent')
+	`, pin, normalizedPhone)
+	if err == nil {
+		return &res
 	}
-	return &res
+
+	err = DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent')
+	`, pin)
+	if err == nil {
+		log.Printf("Controller/agent authenticated via PIN fallback (phone: %s)", phone)
+		return &res
+	}
+
+	return nil
+}
+
+// verifyControllerPINByPin verifies a controller PIN with phone number check (with fallback)
+func verifyControllerPINByPin(phone string, pin string) *controllerPINResult {
+	var res controllerPINResult
+	// Normalize phone number (remove leading + if present)
+	normalizedPhone := strings.TrimPrefix(phone, "+")
+
+	// First try exact phone + PIN match
+	err := DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND REPLACE(u.phone, '+', '') = $2
+		  AND u.role IN ('controller', 'agent')
+	`, pin, normalizedPhone)
+	if err == nil {
+		return &res
+	}
+
+	// Fallback: try PIN-only match (for cases where session phone is a LID that can't be resolved)
+	err = DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent')
+	`, pin)
+	if err == nil {
+		log.Printf("Controller/agent authenticated via PIN fallback (phone: %s)", phone)
+		return &res
+	}
+
+	return nil
 }
 
 func formatTicketDetail(ticket *CreatedTicket) string {
@@ -170,6 +303,9 @@ func getPromptForStep(s *Session) string {
 	case StepSearchResults:
 		// This step expects a dynamic prompt based on s.Results, but we return a generic one.
 		// The normal flow will override this by building the prompt before calling getPromptForStep.
+		if len(s.Results) > 0 {
+			return formatPaginatedResults(s)
+		}
 		return "🔢 Tapez le numéro du voyage choisi."
 	case StepSeatsCount:
 		return "💺 Combien de sièges voulez-vous réserver ?"
@@ -249,13 +385,7 @@ func getPromptForStep(s *Session) string {
 		}
 		return fmt.Sprintf("📱 Un message USSD de confirmation de %.2f %s vient d'être envoyé sur le numéro %s.\n🔒 Veuillez saisir votre code PIN Mobile Money sur votre téléphone pour valider.\n⏳ Une fois validé, vous recevrez votre billet ici automatiquement !", totalAmount, s.Currency, paymentNumber)
 	case StepAgencyChoice:
-		var b strings.Builder
-		b.WriteString("🏢 Agences actives :\n\n")
-		for i, a := range s.Agencies {
-			b.WriteString(fmt.Sprintf("%s %s\n", numberEmoji(i+1), a.Name))
-		}
-		b.WriteString("\nRépondez avec le numéro de l'agence choisie.")
-		return b.String()
+		return formatAgencyList(s)
 	case StepAgencyMenu:
 		return fmt.Sprintf("🏢 %s\n\n1️⃣ Voir la liste des voyages disponibles\n2️⃣ Rechercher un voyage\n\nRépondez avec le numéro de votre choix.", s.SelectedAgency.Name)
 	case StepAgencyDateChoice:
@@ -263,7 +393,7 @@ func getPromptForStep(s *Session) string {
 	case StepAgencyDateInput:
 		return "📅 Entrez la date du voyage (ex : 13/09/2026 ou 13 septembre 2026)."
 	case StepAgencyVoyages:
-		return "💺 Combien de sièges voulez-vous réserver ?"
+		return formatPaginatedResults(s)
 	case StepMyTicketsPhone:
 		return "📱 Entrez le numéro de téléphone pour chercher vos billets :"
 	case StepAgencyName:
@@ -610,7 +740,9 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			results, err := SearchJourneys(s.Origin, s.Destination, s.Date, "")
 			if err == nil && len(results) > 0 {
 				s.Results = results
-				return formatResults(results)
+				// Reset voyage pagination for new results
+				s.VoyagePage = 0
+				return formatPaginatedResults(s)
 			}
 			var suggestions []JourneyResult
 			sameRoute, _ := SearchUpcomingJourneys(s.Origin, s.Destination, 5)
@@ -633,8 +765,10 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				return "Aucun voyage trouvé pour ce trajet ni pour cette date. Tapez *menu* pour recommencer."
 			}
 			s.Results = suggestions
+			// Reset voyage pagination for new results
+			s.VoyagePage = 0
 			return fmt.Sprintf("Aucun voyage trouvé pour %s → %s le %s.\nVoici d'autres voyages disponibles :\n\n%s",
-				s.Origin, s.Destination, s.Date, formatResults(suggestions))
+				s.Origin, s.Destination, s.Date, formatPaginatedResults(s))
 		}
 		if text == "2" {
 			s.PreviousStep = s.Step
@@ -655,7 +789,9 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		results, err := SearchJourneys(s.Origin, s.Destination, s.Date, "")
 		if err == nil && len(results) > 0 {
 			s.Results = results
-			return formatResults(results)
+			// Reset voyage pagination for new results
+			s.VoyagePage = 0
+			return formatPaginatedResults(s)
 		}
 		var suggestions []JourneyResult
 		var sameRoute []JourneyResult
@@ -680,19 +816,98 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			return "Aucun voyage trouvé pour ce trajet ni pour cette date. Tapez *menu* pour recommencer."
 		}
 		s.Results = suggestions
+		// Reset voyage pagination for new results
+		s.VoyagePage = 0
 		return fmt.Sprintf("Aucun voyage trouvé pour %s → %s le %s.\nVoici d'autres voyages disponibles :\n\n%s",
-			s.Origin, s.Destination, s.Date, formatResults(suggestions))
+			s.Origin, s.Destination, s.Date, formatPaginatedResults(s))
 
 	case StepSearchResults:
-		idx, err := strconv.Atoi(text)
-		if err != nil || idx < 1 || idx > len(s.Results) {
-			return "Numéro invalide. Choisissez un numéro dans la liste, ou tapez *menu* pour recommencer."
+		// Handle voyage selection from search results with pagination
+		trimmed := strings.TrimSpace(text)
+
+		// Handle fixed numeric navigation codes ONLY (strict matching)
+		// Navigation is EXCLUSIVELY "01" (next) and "00" (previous)
+		if trimmed == "01" || trimmed == "0️⃣1️⃣" {
+			// Next page
+			pageSize := 10
+			startIndex := s.VoyagePage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Results) {
+				endIndex = len(s.Results)
+			}
+			if endIndex < len(s.Results) {
+				s.VoyagePage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
 		}
-		selected := s.Results[idx-1]
+		if trimmed == "00" || trimmed == "0️⃣0️⃣" {
+			// Previous page
+			if s.VoyagePage > 0 {
+				s.VoyagePage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
+		}
+
+		// Fallback: text-based navigation (for backward compatibility)
+		lower := strings.ToLower(trimmed)
+		if lower == "precedent" || lower == "précédent" || lower == "previous" {
+			if s.VoyagePage > 0 {
+				s.VoyagePage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
+		}
+		if lower == "suivant" || lower == "next" {
+			pageSize := 10
+			startIndex := s.VoyagePage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Results) {
+				endIndex = len(s.Results)
+			}
+			if endIndex < len(s.Results) {
+				s.VoyagePage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
+		}
+
+		// Handle numeric selection (global index) - ANY other number is item selection
+		choice, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return "Choix invalide. Veuillez entrer un numéro valide (00 pour précédent, 01 pour suivant)."
+		}
+
+		// Validate the global index
+		if choice < 1 || choice > len(s.Results) {
+			return fmt.Sprintf("Numéro invalide. Veuillez entrer un numéro entre 1 et %d.", len(s.Results))
+		}
+
+		// Convert global index (1-based) to array index (0-based)
+		realIndex := choice - 1
+
+		// Verify the item is on the current page
+		pageSize := 10
+		startIndex := s.VoyagePage * pageSize
+		endIndex := startIndex + pageSize
+		if endIndex > len(s.Results) {
+			endIndex = len(s.Results)
+		}
+		if realIndex < startIndex || realIndex >= endIndex {
+			// User selected an item not on current page - guide them
+			currentPageNum := s.VoyagePage + 1
+			totalPages := (len(s.Results) + pageSize - 1) / pageSize
+			return fmt.Sprintf("Cet élément est sur une autre page (page %d/%d).\nUtilisez 00 pour précédent, 01 pour suivant, ou tapez directement le numéro.", currentPageNum, totalPages)
+		}
+
+		selected := s.Results[realIndex]
 		s.SelectedJourneyID = selected.ID
 		s.SelectedJourney = selected
 		s.PreviousStep = s.Step
 		s.Step = StepSeatsCount
+		// Reset pagination for next time
+		s.VoyagePage = 0
 		return getPromptForStep(s)
 
 	case StepSeatsCount:
@@ -777,6 +992,11 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			}
 
 			sendTicketCard(sender, ref, s.SelectedJourney, tickets[0])
+
+			// Send additional tickets for multiple passengers
+			for i := 1; i < len(tickets); i++ {
+				sendTicketCard(sender, ref, s.SelectedJourney, tickets[i])
+			}
 
 			baseAmountUSD := s.SelectedJourney.Price * float64(len(s.Passengers))
 			totalAmountUSD := baseAmountUSD
@@ -1064,47 +1284,82 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		}
 	case StepAgencyChoice:
 		// Handle agency selection with pagination
-		choice, err := strconv.Atoi(text)
-		if err != nil {
-			return "Choix invalide. Veuillez sélectionner un numéro de liste valide."
+		trimmed := strings.TrimSpace(text)
+
+		// Handle fixed numeric navigation codes ONLY (strict matching)
+		// Navigation is EXCLUSIVELY "01" (next) and "00" (previous)
+		if trimmed == "01" || trimmed == "0️⃣1️⃣" {
+			// Next page
+			pageSize := 10
+			startIndex := s.AgencyPage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Agencies) {
+				endIndex = len(s.Agencies)
+			}
+			if endIndex < len(s.Agencies) {
+				s.AgencyPage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
+		}
+		if trimmed == "00" || trimmed == "0️⃣0️⃣" {
+			// Previous page
+			if s.AgencyPage > 0 {
+				s.AgencyPage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
 		}
 
+		// Fallback: text-based navigation (for backward compatibility)
+		lower := strings.ToLower(trimmed)
+		if lower == "precedent" || lower == "précédent" || lower == "previous" {
+			if s.AgencyPage > 0 {
+				s.AgencyPage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
+		}
+		if lower == "suivant" || lower == "next" {
+			pageSize := 10
+			startIndex := s.AgencyPage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Agencies) {
+				endIndex = len(s.Agencies)
+			}
+			if endIndex < len(s.Agencies) {
+				s.AgencyPage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
+		}
+
+		// Handle numeric selection (global index) - ANY other number is item selection
+		choice, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return "Choix invalide. Veuillez entrer un numéro valide (00 pour précédent, 01 pour suivant)."
+		}
+
+		// Validate the global index
+		if choice < 1 || choice > len(s.Agencies) {
+			return fmt.Sprintf("Numéro invalide. Veuillez entrer un numéro entre 1 et %d.", len(s.Agencies))
+		}
+
+		// Convert global index (1-based) to array index (0-based)
+		realIndex := choice - 1
+
+		// Verify the item is on the current page (optional but good for UX)
 		pageSize := 10
 		startIndex := s.AgencyPage * pageSize
-
-		// Calculate how many agencies are displayed on current page
-		displayedAgencies := 0
-		if startIndex < len(s.Agencies) {
-			if len(s.Agencies)-startIndex < pageSize {
-				displayedAgencies = len(s.Agencies) - startIndex
-			} else {
-				displayedAgencies = pageSize
-			}
+		endIndex := startIndex + pageSize
+		if endIndex > len(s.Agencies) {
+			endIndex = len(s.Agencies)
 		}
-
-		// Calculate the choice number for "Suivant" button (if applicable)
-		var nextPageChoice int
-		var hasNextPage bool
-		if startIndex+displayedAgencies < len(s.Agencies) {
-			nextPageChoice = displayedAgencies + 1
-			hasNextPage = true
-		}
-
-		// Check if user selected "Suivant" (next page)
-		if hasNextPage && choice == nextPageChoice {
-			s.AgencyPage++
-			return getPromptForStep(s)
-		}
-
-		// Handle agency selection (1 to displayedAgencies)
-		if choice < 1 || choice > displayedAgencies {
-			return "Choix invalide. Veuillez sélectionner un numéro de liste valide."
-		}
-
-		// Calculate real index in the agencies array
-		realIndex := startIndex + (choice - 1)
-		if realIndex >= len(s.Agencies) {
-			return "Choix invalide. Veuillez sélectionner un numéro de liste valide."
+		if realIndex < startIndex || realIndex >= endIndex {
+			// User selected an item not on current page - guide them
+			currentPageNum := s.AgencyPage + 1
+			totalPages := (len(s.Agencies) + pageSize - 1) / pageSize
+			return fmt.Sprintf("Cet élément est sur une autre page (page %d/%d).\nUtilisez 00 pour précédent, 01 pour suivant, ou tapez directement le numéro.", currentPageNum, totalPages)
 		}
 
 		selectedAgency := s.Agencies[realIndex]
@@ -1179,10 +1434,14 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 					return "Aucun voyage trouvé pour cette agence aujourd'hui. Tapez *menu* pour recommencer."
 				}
 				s.Results = suggestions
-				return fmt.Sprintf("Aucun voyage trouvé pour cette agence aujourd'hui.\nVoici d'autres voyages disponibles :\n\n%s", formatResults(suggestions))
+			// Reset voyage pagination for new results
+			s.VoyagePage = 0
+			return fmt.Sprintf("Aucun voyage trouvé pour cette agence aujourd'hui.\nVoici d'autres voyages disponibles :\n\n%s", formatPaginatedResults(s))
 			}
 			s.Results = filteredResults
-			return formatResults(s.Results)
+			// Reset voyage pagination for new results
+			s.VoyagePage = 0
+			return formatPaginatedResults(s)
 		} else if text == "2" {
 			s.PreviousStep = s.Step
 			s.Step = StepAgencyDateInput
@@ -1239,21 +1498,101 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				return fmt.Sprintf("Aucun voyage trouvé pour cette agence le %s. Tapez *menu* pour recommencer.", date)
 			}
 			s.Results = suggestions
-			return fmt.Sprintf("Aucun voyage trouvé pour cette agence le %s.\nVoici d'autres voyages disponibles :\n\n%s", date, formatResults(suggestions))
+			// Reset voyage pagination for new results
+			s.VoyagePage = 0
+			return fmt.Sprintf("Aucun voyage trouvé pour cette agence le %s.\nVoici d'autres voyages disponibles :\n\n%s", date, formatPaginatedResults(s))
 		}
 		s.Results = filteredResults
-		return formatResults(s.Results)
+		// Reset voyage pagination for new results
+		s.VoyagePage = 0
+		return formatPaginatedResults(s)
 	case StepAgencyVoyages:
 		// Handle voyage selection from agency's voyage list with pagination
-		idx, err := strconv.Atoi(text)
-		if err != nil || idx < 1 || idx > len(s.Results) {
-			return "Numéro invalide. Choisissez un numéro dans la liste, ou tapez *menu* pour recommencer."
+		trimmed := strings.TrimSpace(text)
+
+		// Handle fixed numeric navigation codes ONLY (strict matching)
+		// Navigation is EXCLUSIVELY "01" (next) and "00" (previous)
+		if trimmed == "01" || trimmed == "0️⃣1️⃣" {
+			// Next page
+			pageSize := 10
+			startIndex := s.VoyagePage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Results) {
+				endIndex = len(s.Results)
+			}
+			if endIndex < len(s.Results) {
+				s.VoyagePage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
 		}
-		selected := s.Results[idx-1]
+		if trimmed == "00" || trimmed == "0️⃣0️⃣" {
+			// Previous page
+			if s.VoyagePage > 0 {
+				s.VoyagePage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
+		}
+
+		// Fallback: text-based navigation (for backward compatibility)
+		lower := strings.ToLower(trimmed)
+		if lower == "precedent" || lower == "précédent" || lower == "previous" {
+			if s.VoyagePage > 0 {
+				s.VoyagePage--
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la première page."
+		}
+		if lower == "suivant" || lower == "next" {
+			pageSize := 10
+			startIndex := s.VoyagePage * pageSize
+			endIndex := startIndex + pageSize
+			if endIndex > len(s.Results) {
+				endIndex = len(s.Results)
+			}
+			if endIndex < len(s.Results) {
+				s.VoyagePage++
+				return getPromptForStep(s)
+			}
+			return "Vous êtes déjà sur la dernière page."
+		}
+
+		// Handle numeric selection (global index) - ANY other number is item selection
+		choice, err := strconv.Atoi(trimmed)
+		if err != nil {
+			return "Choix invalide. Veuillez entrer un numéro valide (00 pour précédent, 01 pour suivant)."
+		}
+
+		// Validate the global index
+		if choice < 1 || choice > len(s.Results) {
+			return fmt.Sprintf("Numéro invalide. Veuillez entrer un numéro entre 1 et %d.", len(s.Results))
+		}
+
+		// Convert global index (1-based) to array index (0-based)
+		realIndex := choice - 1
+
+		// Verify the item is on the current page
+		pageSize := 10
+		startIndex := s.VoyagePage * pageSize
+		endIndex := startIndex + pageSize
+		if endIndex > len(s.Results) {
+			endIndex = len(s.Results)
+		}
+		if realIndex < startIndex || realIndex >= endIndex {
+			// User selected an item not on current page - guide them
+			currentPageNum := s.VoyagePage + 1
+			totalPages := (len(s.Results) + pageSize - 1) / pageSize
+			return fmt.Sprintf("Cet élément est sur une autre page (page %d/%d).\nUtilisez 00 pour précédent, 01 pour suivant, ou tapez directement le numéro.", currentPageNum, totalPages)
+		}
+
+		selected := s.Results[realIndex]
 		s.SelectedJourneyID = selected.ID
 		s.SelectedJourney = selected
 		s.PreviousStep = s.Step
 		s.Step = StepSeatsCount
+		// Reset pagination for next time
+		s.VoyagePage = 0
 		return getPromptForStep(s)
 
 	case StepVerificationMenu:
@@ -1377,19 +1716,12 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			return "Veuillez saisir votre code PIN agent :"
 		}
 
-		// Format phone number for consistency (ensure it starts with country code without +)
-		var formattedPhone string
-		phoneInput := strings.TrimSpace(s.UserPhone)
-		if strings.HasPrefix(phoneInput, "+") {
-			formattedPhone = phoneInput[1:] // Remove leading +
-		} else {
-			formattedPhone = phoneInput
-		}
+		pin := strings.TrimSpace(text)
 
-		// Verify the PIN against the user's phone number
-		result := verifyControllerPIN(formattedPhone, strings.TrimSpace(text))
+		// Verify the PIN using the sender JID with flexible matching
+		result := verifyControllerPINWithSender(sender, pin)
 		if result == nil {
-			log.Printf("Authentification agent échouée pour le numéro %s et le PIN %s", formattedPhone, strings.TrimSpace(text))
+			log.Printf("Authentification agent/contrôleur échouée pour l'expéditeur %s et le PIN %s", sender.User, pin)
 			return "❌ Code PIN incorrect ou numéro non autorisé. Tapez *menu* pour recommencer."
 		}
 
@@ -1425,11 +1757,12 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 
 		pin := strings.TrimSpace(text)
 
-		// Verify the PIN in database (no phone check, just PIN)
-		result := verifyControllerPINByPin(pin)
+		// Verify the PIN using the sender JID with flexible matching
+		// This handles LID, phone numbers, and other identifier formats dynamically
+		result := verifyControllerPINWithSender(sender, pin)
 		if result == nil {
-			log.Printf("Authentification agent échouée pour le PIN %s", pin)
-			return "❌ Code PIN incorrect. Veuillez réessayer ou tapez *menu* pour annuler."
+			log.Printf("Authentification agent/contrôleur échouée pour l'expéditeur %s et le PIN %s", sender.User, pin)
+			return "❌ Code PIN incorrect ou numéro non autorisé. Veuillez réessayer ou tapez *menu* pour annuler."
 		}
 
 		// PIN is valid, set controller authentication fields
@@ -1444,7 +1777,7 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		// Build controller menu message with exact format
 		var menu strings.Builder
 		menu.WriteString("✅ *Authentification réussie !*\n")
-		menu.WriteString(fmt.Sprintf("Bienvenue, %s (\n", s.AgentName))
+		menu.WriteString(fmt.Sprintf("Bienvenue, %s !\n", s.AgentName))
 		menu.WriteString("👮 *Guichet Contrôleur*\n\n")
 		menu.WriteString("🏢 *Agences affectées :*\n")
 		for i, agency := range s.AssignedAgencies {
@@ -2268,6 +2601,22 @@ func processCashPaymentOnly(s *Session) string {
 // and processes it for payment validation
 func searchBookingForPaymentValidation(s *Session, input string) string {
 	var bookingResult BookingDetailsResult
+
+	// Normalize input for phone matching (extract digits only)
+	inputDigits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, strings.TrimPrefix(input, "+"))
+
+	// Compute suffix for flexible matching (last 9 digits or all if shorter)
+	suffixLen := 9
+	if len(inputDigits) < suffixLen {
+		suffixLen = len(inputDigits)
+	}
+	inputSuffix := inputDigits[len(inputDigits)-suffixLen:]
+
 	err := DB.Get(&bookingResult, `
 		SELECT
 			b.id AS booking_id,
@@ -2292,10 +2641,12 @@ func searchBookingForPaymentValidation(s *Session, input string) string {
 		JOIN organizations o ON j.organization_id = o.id
 		WHERE b.booking_reference = $1
 		   OR t.passenger_phone ILIKE '%' || $1 || '%'
+		   OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') = $2
+		   OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') LIKE '%' || $3
 		   OR t.passenger_name ILIKE '%' || $1 || '%'
 		   OR t.qr_token = $1
 		LIMIT 1
-	`, input)
+	`, input, inputDigits, inputSuffix)
 
 	if err != nil {
 		if err == sql.ErrNoRows {
@@ -2565,6 +2916,8 @@ func sendTicketImage(to types.JID, t CreatedTicket) {
 // Additional helper functions
 var digitEmojis = []string{"0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣"}
 
+const pageSize = 10
+
 func numberEmoji(n int) string {
 	if n == 10 {
 		return "🔟"
@@ -2576,6 +2929,101 @@ func numberEmoji(n int) string {
 	for _, c := range strconv.Itoa(n) {
 		b.WriteString(digitEmojis[c-'0'])
 	}
+	return b.String()
+}
+
+func formatAgencyList(s *Session) string {
+	if len(s.Agencies) == 0 {
+		return "Aucune agence active trouvée. Tapez *menu* pour réessayer."
+	}
+
+	pageSize := 10
+	startIndex := s.AgencyPage * pageSize
+	endIndex := startIndex + pageSize
+	if endIndex > len(s.Agencies) {
+		endIndex = len(s.Agencies)
+	}
+
+	var b strings.Builder
+	b.WriteString("🏢 *Agences actives* ")
+	if len(s.Agencies) > pageSize {
+		b.WriteString(fmt.Sprintf("(Page %d/%d)", s.AgencyPage+1, (len(s.Agencies)+pageSize-1)/pageSize))
+	}
+	b.WriteString(" :\n\n")
+
+	// Continuous global numbering: Page 0 shows 1-10, Page 1 shows 11-20, etc.
+	for i := startIndex; i < endIndex; i++ {
+		globalNum := i + 1 // 1-based global index
+		b.WriteString(fmt.Sprintf("%s %s\n", numberEmoji(globalNum), s.Agencies[i].Name))
+	}
+
+	// Add navigation options with fixed numeric codes
+	if s.AgencyPage > 0 || endIndex < len(s.Agencies) {
+		b.WriteString("\n──────────────────\n")
+		if s.AgencyPage > 0 {
+			b.WriteString("0️⃣0️⃣ ⬅️ Page précédente (Tapez 00)\n")
+		}
+		if endIndex < len(s.Agencies) {
+			b.WriteString("0️⃣1️⃣ ➡️ Page suivante (Tapez 01)\n")
+		}
+		b.WriteString("──────────────────\n")
+	}
+
+	b.WriteString("\nRépondez avec le numéro de l'agence choisie.")
+	return b.String()
+}
+
+func formatPaginatedResults(s *Session) string {
+	if len(s.Results) == 0 {
+		return "Aucun voyage trouvé."
+	}
+
+	pageSize := 10
+	startIndex := s.VoyagePage * pageSize
+	endIndex := startIndex + pageSize
+	if endIndex > len(s.Results) {
+		endIndex = len(s.Results)
+	}
+
+	var b strings.Builder
+	b.WriteString("🚌 *Liste des voyages disponibles* ")
+	if len(s.Results) > pageSize {
+		b.WriteString(fmt.Sprintf("(Page %d/%d)", s.VoyagePage+1, (len(s.Results)+pageSize-1)/pageSize))
+	}
+	b.WriteString(" :\n\n")
+
+	// Continuous global numbering: Page 0 shows 1-10, Page 1 shows 11-20, etc.
+	for i := startIndex; i < endIndex; i++ {
+		r := s.Results[i]
+		globalNum := i + 1 // 1-based global index
+		departDateFormatted := formatDate(r.Date)
+		arriveDateFormatted := formatDate(r.ArrivalDate)
+		departTimeFormatted := formatTime(r.Time)
+		arriveTimeFormatted := formatTime(r.ArrivalTime)
+		duration := calculateDuration(r.Time, r.ArrivalTime)
+		priceCDF := r.Price * 2850
+
+		b.WriteString(fmt.Sprintf("%s %s → %s\n• Agence : %s\n• 🚀 Départ : %s à %s\n• 🏁 Arrivée : %s à %s\n• ⏱️ Durée estimée : %s\n• 💰 Prix : %.0f USD / %.0f CDF\n\n",
+			numberEmoji(globalNum), r.Origin, r.Destination, r.AgencyName,
+			departDateFormatted, departTimeFormatted,
+			arriveDateFormatted, arriveTimeFormatted,
+			duration,
+			r.Price, priceCDF))
+	}
+
+	// Add navigation options with fixed numeric codes
+	if s.VoyagePage > 0 || endIndex < len(s.Results) {
+		b.WriteString("\n──────────────────\n")
+		if s.VoyagePage > 0 {
+			b.WriteString("0️⃣0️⃣ ⬅️ Page précédente (Tapez 00)\n")
+		}
+		if endIndex < len(s.Results) {
+			b.WriteString("0️⃣1️⃣ ➡️ Page suivante (Tapez 01)\n")
+		}
+		b.WriteString("──────────────────\n")
+	}
+
+	b.WriteString("\nTapez le numéro du voyage choisi (numérotation continue).")
 	return b.String()
 }
 

@@ -35,8 +35,9 @@ export default function Passengers() {
       if (busFilter) params.set("bus_id", busFilter)
       if (journeyFilter) params.set("journey_id", journeyFilter)
       const query = params.toString() ? `?${params.toString()}` : ""
-      const data = await api.get<TicketWithDetails[]>(`/tickets${query}`)
-      setTickets(data)
+      const data = await api.get<any>(`/tickets${query}`)
+      // Ensure we always have an array (API might return null, undefined, or non-array)
+      setTickets(Array.isArray(data) ? data : [])
     } catch (err) {
       setError((err as Error).message)
     } finally {

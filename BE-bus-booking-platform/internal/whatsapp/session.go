@@ -114,6 +114,7 @@ type Session struct {
 	OrderNumber           string // FlexPay order number for tracking payment status
 	Agencies              []Agency
 	AgencyPage            int    // current page for agency pagination (0-based)
+	VoyagePage            int    // current page for voyage pagination (0-based)
 	// Agency creation flow
 	AgencyName   string
 	ManagerName  string

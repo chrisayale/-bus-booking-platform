@@ -101,6 +101,17 @@ func main() {
 		c.JSON(http.StatusOK, gin.H{"status": "OK"})
 	})
 
+	// WhatsApp QR code endpoint
+	r.GET("/api/whatsapp/qr", func(c *gin.Context) {
+		qr := whatsapp.GetCurrentQR()
+		if qr == nil {
+			c.JSON(http.StatusNotFound, gin.H{"error": "QR code not available"})
+			return
+		}
+		c.Header("Content-Type", "image/png")
+		c.Data(http.StatusOK, "image/png", qr)
+	})
+
 	// Payment webhooks
 	api := r.Group("/api")
 	{

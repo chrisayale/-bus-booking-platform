@@ -9,15 +9,15 @@ export default function Buses() {
   const [form, setForm] = useState({ registration_number: "", capacity: 40, driver_name: "" })
 
   useEffect(() => {
-    api.get<Bus[]>("/buses").then(setBuses).catch(console.error)
+    api.get<any>("/buses").then((data) => setBuses(Array.isArray(data) ? data : [])).catch(console.error)
   }, [])
 
   const createBus = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
       await api.post("/buses", form)
-      const updated = await api.get<Bus[]>("/buses")
-      setBuses(updated)
+      const updated = await api.get<any>("/buses")
+      setBuses(Array.isArray(updated) ? updated : [])
       setShowForm(false)
       setForm({ registration_number: "", capacity: 40, driver_name: "" })
     } catch (err) {

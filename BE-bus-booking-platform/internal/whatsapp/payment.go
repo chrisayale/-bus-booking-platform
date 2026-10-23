@@ -507,7 +507,7 @@ func CompleteBookingFromPayment(p *payments.Payment) error {
 	cleanedPhone := CleanPhoneNumber(meta.GuestPhone)
 	jid := types.NewJID(cleanedPhone, "s.whatsapp.net")
 
-	_, _, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL)
+	tickets, ref, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL)
 	if err != nil {
 		SendText(jid, fmt.Sprintf(
 			"⚠️ Votre paiement a été confirmé, mais un problème est survenu lors de la création de votre billet : %s\nContactez le support. Référence paiement : %s",
@@ -524,6 +524,41 @@ func CompleteBookingFromPayment(p *payments.Payment) error {
 		FROM journeys WHERE id=$1`, meta.JourneyID)
 	if err == nil {
 		_ = enrichJourneys([]models.Journey{mj})
+	}
+
+	// Enrich the journey to get full details for ticket cards
+	var journeyResult JourneyResult
+	if err == nil {
+		var route models.Route
+		if err := DB.Get(&route, `SELECT * FROM routes WHERE id=$1`, mj.RouteID); err == nil {
+			var org models.Organization
+			DB.Get(&org, `SELECT * FROM organizations WHERE id=$1`, mj.OrganizationID)
+			var bus models.Bus
+			DB.Get(&bus, `SELECT * FROM buses WHERE id=$1`, mj.BusID)
+
+			journeyResult = JourneyResult{
+				ID:              mj.ID,
+				Origin:          route.Origin,
+				Destination:     route.Destination,
+				Date:            mj.DepartureDate,
+				Time:            mj.DepartureTime,
+				ArrivalTime:     mj.ArrivalTime,
+				Price:           route.BasePrice,
+				AgencyName:      org.Name,
+				AgencyPhone:     derefStr(org.Phone),
+				BusRegistration: bus.RegistrationNumber,
+			}
+		}
+	}
+
+	// Send ticket cards for all passengers
+	if len(tickets) > 0 && journeyResult.ID != "" {
+		sendTicketCard(jid, ref, journeyResult, tickets[0])
+
+		// Send additional tickets for multiple passengers
+		for i := 1; i < len(tickets); i++ {
+			sendTicketCard(jid, ref, journeyResult, tickets[i])
+		}
 	}
 
 	var amountStr string
@@ -545,7 +580,7 @@ func CompleteBookingFromPayment(p *payments.Payment) error {
 		statut = fmt.Sprintf("Statut %s", p.Status)
 	}
 
-	confirmationMsg := fmt.Sprintf("✅ PAIEMENT CONFIRMÉ !\n\n🧾 REÇU DE FACTURATION :\n- ID Transaction : %s\n- Mode de paiement : %s\n- Montant : %s\n- Date & Heure : %s\n- Statut : %s\n\n🎟️ Votre billet de bus est désormais OFFICIELLEMENT CONFIRMÉ.\n⚠️ Veuillez présenter ce billet ou votre code de confirmation lors de l'embarquement pour vérification.\n\n🚌 Toute l'équipe d'AyaleTrans vous souhaite un très bon voyage !\n\n📞 Assistance Client :\n- Tél & WhatsApp : +243974645174",
+	confirmationMsg := fmt.Sprintf("✅ PAIEMENT CONFIRMÉ !\n\n🧾 REÇU DE FACTURATION :\n- ID Transaction : %s\n- Mode de paiement : %s\n- Montant : %s\n- Date & Heure : %s\n- Statut : %s\n\n🎟️ Vos billet(s) de bus sont désormais OFFICIELLEMENT CONFIRMÉ(S).\n⚠️ Veuillez présenter ce(s) billet(s) ou votre code de confirmation lors de l'embarquement pour vérification.\n\n🚌 Toute l'équipe d'AyaleTrans vous souhaite un très bon voyage !\n\n📞 Assistance Client :\n- Tél & WhatsApp : +243974645174",
 		p.Reference, meta.PaymentType, amountStr, dateHeure, statut)
 
 	SendText(jid, confirmationMsg)

@@ -15,13 +15,13 @@ export default function Journeys() {
 
   useEffect(() => {
     Promise.all([
-      api.get<Journey[]>("/journeys"),
-      api.get<Bus[]>("/buses"),
-      api.get<Route[]>("/routes"),
+      api.get<any>("/journeys"),
+      api.get<any>("/buses"),
+      api.get<any>("/routes"),
     ]).then(([j, b, r]) => {
-      setJourneys(j)
-      setBuses((b ?? []).filter((x) => x.is_active))
-      setRoutes(r)
+      setJourneys(Array.isArray(j) ? j : [])
+      setBuses((Array.isArray(b) ? b : []).filter((x) => x.is_active))
+      setRoutes(Array.isArray(r) ? r : [])
     }).catch(console.error)
   }, [])
 
@@ -29,8 +29,8 @@ export default function Journeys() {
     e.preventDefault()
     try {
       await api.post("/journeys", form)
-      const updated = await api.get<Journey[]>("/journeys")
-      setJourneys(updated)
+      const updated = await api.get<any>("/journeys")
+      setJourneys(Array.isArray(updated) ? updated : [])
       setShowForm(false)
     } catch (err) {
       alert((err as Error).message)

@@ -15,15 +15,15 @@ export default function Routes() {
   })
 
   useEffect(() => {
-    api.get<Route[]>("/routes").then(setRoutes).catch(console.error)
+    api.get<any>("/routes").then((data) => setRoutes(Array.isArray(data) ? data : [])).catch(console.error)
   }, [])
 
   const createRoute = async (e: React.FormEvent) => {
     e.preventDefault()
     try {
       await api.post("/routes", form)
-      const updated = await api.get<Route[]>("/routes")
-      setRoutes(updated)
+      const updated = await api.get<any>("/routes")
+      setRoutes(Array.isArray(updated) ? updated : [])
       setShowForm(false)
       setForm({ name: "", origin: "", destination: "", base_price: 50, stops: [{ location: "", stop_order: 0, stop_price: 0 }] })
     } catch (err) {
