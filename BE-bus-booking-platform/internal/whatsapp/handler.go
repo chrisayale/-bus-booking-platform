@@ -2411,6 +2411,10 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				return "Choix invalide. Veuillez sélectionner 1, 2 ou 3, ou tapez *menu* pour annuler."
 			}
 
+		case StepControllerPayAllConfirm:
+			// Handle pay all tickets confirmation
+			return processControllerPayAllConfirm(s, text)
+
 		default:
 			return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
 		}
@@ -2874,6 +2878,23 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 		return dateStr + " " + timeStr
 	}
 
+	// Helper to convert number to emoji (1️⃣, 2️⃣, etc.)
+	numberToEmoji := func(n int) string {
+		emojis := []string{"0️⃣", "1️⃣", "2️⃣", "3️⃣", "4️⃣", "5️⃣", "6️⃣", "7️⃣", "8️⃣", "9️⃣", "🔟"}
+		if n >= 0 && n < len(emojis) {
+			return emojis[n]
+		}
+		// For numbers > 10, build from digits
+		digits := strconv.Itoa(n)
+		var result strings.Builder
+		for _, d := range digits {
+			if d >= '0' && d <= '9' {
+				result.WriteString(emojis[d-'0'])
+			}
+		}
+		return result.String()
+	}
+
 	// Helper to group results by booking reference and render cards
 	renderBookingCards := func(results []BookingDetailsResult, isPaid bool, startNum int) (string, int) {
 		if len(results) == 0 {
@@ -2890,6 +2911,7 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 			DepartureDate   string
 			DepartureTime   string
 			Tickets         []BookingDetailsResult
+			GroupIndex      int // Index for "Pay All" option (T1, T2, etc.)
 		}
 
 		bookingMap := make(map[string]*groupedBooking)
@@ -2906,6 +2928,7 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 					DepartureDate: result.DepartureDate,
 					DepartureTime: result.DepartureTime,
 					Tickets:       []BookingDetailsResult{},
+					GroupIndex:    len(bookingOrder) + 1, // 1-based index for T1, T2, etc.
 				}
 				bookingOrder = append(bookingOrder, result.BookingReference)
 			}
@@ -2923,10 +2946,10 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 			cardBuilder.WriteString(fmt.Sprintf("🏢 *Agence* : %s\n", gb.AgencyName))
 			cardBuilder.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", gb.Origin, gb.Destination))
 			cardBuilder.WriteString(fmt.Sprintf("📅 *Départ* : %s\n", departureStr))
-			cardBuilder.WriteString(fmt.Sprintf("💰 *Total* : %.2f USD\n\n", gb.TotalAmount))
+			cardBuilder.WriteString(fmt.Sprintf("💰 *Total Groupe* : %.2f USD\n\n", gb.TotalAmount))
 
 			cardBuilder.WriteString("👥 *Passagers / Sièges* :\n")
-			for _, ticket := range gb.Tickets {
+			for i, ticket := range gb.Tickets {
 				seatNum := ticket.SeatNumber
 				if seatNum == "" {
 					seatNum = "N/A"
@@ -2942,9 +2965,18 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 					actionLabel = "Check-in"
 					actionPrefix = "P"
 				}
-				cardBuilder.WriteString(fmt.Sprintf("  • %d 👤 %s — 💺 Siège %s (Tapez **%s%d** pour %s)\n",
-					num, passengerName, seatNum, actionPrefix, num, actionLabel))
+				emojiNum := numberToEmoji(i + 1)
+				cardBuilder.WriteString(fmt.Sprintf("  • %s 👤 %s — 💺 Siège %s (💵 %.2f USD) ➔ Tapez **%s%d** pour %s\n",
+					emojiNum, passengerName, seatNum, ticket.Price, actionPrefix, num, actionLabel))
 				num++
+			}
+
+			// Add "Pay All" option for unpaid bookings only
+			if !isPaid {
+				payAllEmoji := numberToEmoji(gb.GroupIndex)
+				cardBuilder.WriteString(fmt.Sprintf("\n⚡ *Action Rapide* :\n"))
+				cardBuilder.WriteString(fmt.Sprintf("  • %s Tapez **T%d** pour payer TOUTE la réservation (%.2f USD)\n",
+					payAllEmoji, gb.GroupIndex, gb.TotalAmount))
 			}
 			cardBuilder.WriteString("\n")
 		}
@@ -2979,7 +3011,8 @@ func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
 
 	b.WriteString("Tapez le numéro pour sélectionner un billet :\n")
 	b.WriteString("• Pour les impayés : tapez le numéro (1, 2, ...)\n")
-	b.WriteString("• Pour les payés : tapez P + numéro (ex: P1, P2)\n\n")
+	b.WriteString("• Pour les payés : tapez P + numéro (ex: P1, P2)\n")
+	b.WriteString("• Pour payer TOUT un groupe : tapez T + numéro (ex: T1, T2)\n\n")
 	b.WriteString("0️⃣0️⃣ Précédent\n")
 	b.WriteString("0️⃣1️⃣ Suivant\n")
 
@@ -3011,12 +3044,23 @@ func handleControllerPhoneSelection(s *Session, input string) string {
 		return "Navigation suivante non disponible pour cette recherche.\n\nTapez *menu* pour retourner au menu principal."
 	}
 
+	// Check if selection is for "Pay All" (T prefix)
+	isPayAllSelection := strings.HasPrefix(input, "T")
+	if isPayAllSelection {
+		selectionStr := strings.TrimPrefix(input, "T")
+		groupIndex, err := strconv.Atoi(selectionStr)
+		if err != nil || groupIndex < 1 {
+			return "❌ Sélection invalide. Tapez T + numéro du groupe (ex: T1), ou *menu* pour annuler."
+		}
+		return handleControllerPayAllSelection(s, groupIndex, unpaidResults)
+	}
+
 	// Check if selection is for paid list (P prefix)
 	isPaidSelection := strings.HasPrefix(input, "P")
 	selectionStr := strings.TrimPrefix(input, "P")
 	selectionNum, err := strconv.Atoi(selectionStr)
 	if err != nil || selectionNum < 1 {
-		return "❌ Sélection invalide. Tapez le numéro du billet (ex: 1 ou P1), ou *menu* pour annuler."
+		return "❌ Sélection invalide. Tapez le numéro du billet (ex: 1 ou P1), ou T + groupe (ex: T1), ou *menu* pour annuler."
 	}
 
 	var selectedResult *BookingDetailsResult
@@ -3039,6 +3083,253 @@ func handleControllerPhoneSelection(s *Session, input string) string {
 
 	// Process the selected booking
 	return processControllerBookingResult(s, *selectedResult)
+}
+
+// handleControllerPayAllSelection handles the "Pay All" selection for a booking group
+// Processes cash payment for ALL pending tickets in the selected booking
+func handleControllerPayAllSelection(s *Session, groupIndex int, unpaidResults []BookingDetailsResult) string {
+	// Group unpaid results by booking reference to find the target group
+	bookingMap := make(map[string][]BookingDetailsResult)
+	bookingOrder := []string{}
+
+	for _, result := range unpaidResults {
+		if _, exists := bookingMap[result.BookingReference]; !exists {
+			bookingOrder = append(bookingOrder, result.BookingReference)
+		}
+		bookingMap[result.BookingReference] = append(bookingMap[result.BookingReference], result)
+	}
+
+	if groupIndex > len(bookingOrder) {
+		return fmt.Sprintf("❌ Groupe invalide. Il y a %d groupe(s) de réservation(s).\n\nTapez *menu* pour annuler.", len(bookingOrder))
+	}
+
+	targetRef := bookingOrder[groupIndex-1]
+	tickets := bookingMap[targetRef]
+
+	if len(tickets) == 0 {
+		return "❌ Aucun billet dans ce groupe.\n\nTapez *menu* pour annuler."
+	}
+
+	// Get the first ticket to extract booking info
+	firstTicket := tickets[0]
+	bookingID := firstTicket.BookingID
+	bookingRef := firstTicket.BookingReference
+	passengerName := firstTicket.PassengerName
+	origin := firstTicket.Origin
+	destination := firstTicket.Destination
+	totalAmount := firstTicket.TotalAmount
+
+	// Store all ticket IDs in session for processing
+	ticketIDs := make([]string, len(tickets))
+	passengerPhones := make([]string, len(tickets))
+	passengerNames := make([]string, len(tickets))
+	seatNumbers := make([]string, len(tickets))
+
+	for i, t := range tickets {
+		ticketIDs[i] = t.TicketID
+		passengerPhones[i] = t.PassengerPhone
+		passengerNames[i] = t.PassengerName
+		seatNumbers[i] = t.SeatNumber
+	}
+
+	// Store in session for the payment processing
+	if s.Data == nil {
+		s.Data = make(map[string]interface{})
+	}
+	s.Data["controller_booking_id"] = bookingID
+	s.Data["controller_booking_ref"] = bookingRef
+	s.Data["controller_passenger_name"] = passengerName
+	s.Data["controller_origin"] = origin
+	s.Data["controller_destination"] = destination
+	s.Data["controller_total_amount"] = totalAmount
+	s.Data["controller_pay_all"] = true
+	s.Data["controller_ticket_ids"] = ticketIDs
+	s.Data["controller_passenger_phones"] = passengerPhones
+	s.Data["controller_passenger_names"] = passengerNames
+	s.Data["controller_seat_numbers"] = seatNumbers
+
+	// Clear search results
+	delete(s.Data, "controller_unpaid_results")
+	delete(s.Data, "controller_paid_results")
+	delete(s.Data, "controller_search_type")
+
+	// Show confirmation for pay all
+	var b strings.Builder
+	b.WriteString(fmt.Sprintf("💳 *Paiement Groupe - Réservation %s*\n\n", bookingRef))
+	b.WriteString(fmt.Sprintf("👤 *Passager principal* : %s\n", passengerName))
+	b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", origin, destination))
+	b.WriteString(fmt.Sprintf("📅 *Départ* : %s\n", formatDate(firstTicket.DepartureDate)))
+	b.WriteString(fmt.Sprintf("💰 *Montant total* : %.2f USD\n\n", totalAmount))
+
+	b.WriteString("📋 *Billets concernés* :\n")
+	for i, t := range tickets {
+		name := t.PassengerName
+		if name == "" {
+			name = "Passager"
+		}
+		seat := t.SeatNumber
+		if seat == "" {
+			seat = "N/A"
+		}
+		b.WriteString(fmt.Sprintf("  %d️⃣ %s — 💺 Siège %s (💵 %.2f USD)\n", i+1, name, seat, t.Price))
+	}
+
+	b.WriteString("\nConfirmez-vous le paiement de TOUS ces billets ?\n")
+	b.WriteString("1️⃣ Oui, payer tout le groupe\n")
+	b.WriteString("2️⃣ Non, retour\n")
+
+	// Set step to confirmation
+	s.PreviousStep = s.Step
+	s.Step = StepControllerPayAllConfirm
+
+	return b.String()
+}
+
+// processControllerPayAllConfirm handles the confirmation for paying all tickets in a booking
+func processControllerPayAllConfirm(s *Session, input string) string {
+	input = strings.TrimSpace(input)
+	if input == "1" || input == "1️⃣" {
+		return processCashPaymentAllTickets(s)
+	}
+	// Cancel - go back to search
+	s.Step = StepControllerValidatePayment
+	return getPromptForStep(s)
+}
+
+// processCashPaymentAllTickets processes cash payment for ALL tickets in a booking
+func processCashPaymentAllTickets(s *Session) string {
+	bookingID := ""
+	bookingRef := ""
+	origin := ""
+	destination := ""
+	totalAmount := 0.0
+	var ticketIDs []string
+	var passengerPhones []string
+	var passengerNames []string
+	var seatNumbers []string
+
+	if s.Data != nil {
+		if id, ok := s.Data["controller_booking_id"].(string); ok {
+			bookingID = id
+		}
+		if ref, ok := s.Data["controller_booking_ref"].(string); ok {
+			bookingRef = ref
+		}
+		if org, ok := s.Data["controller_origin"].(string); ok {
+			origin = org
+		}
+		if dest, ok := s.Data["controller_destination"].(string); ok {
+			destination = dest
+		}
+		if amount, ok := s.Data["controller_total_amount"].(float64); ok {
+			totalAmount = amount
+		}
+		if ids, ok := s.Data["controller_ticket_ids"].([]string); ok {
+			ticketIDs = ids
+		}
+		if phones, ok := s.Data["controller_passenger_phones"].([]string); ok {
+			passengerPhones = phones
+		}
+		if names, ok := s.Data["controller_passenger_names"].([]string); ok {
+			passengerNames = names
+		}
+		if seats, ok := s.Data["controller_seat_numbers"].([]string); ok {
+			seatNumbers = seats
+		}
+	}
+
+	if bookingID == "" || len(ticketIDs) == 0 {
+		return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
+	}
+
+	// Start transaction for atomic operations
+	tx, err := DB.Beginx()
+	if err != nil {
+		return fmt.Sprintf("❌ Erreur lors du début de la transaction : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 1. Update booking status to confirmed
+	_, err = tx.Exec(`UPDATE bookings SET status = 'confirmed' WHERE id = $1`, bookingID)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la confirmation de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 2. Create/validate cash payment record
+	var paymentID string
+	err = tx.Get(&paymentID, `SELECT id FROM payments WHERE reference = $1`, bookingRef+"_cash")
+	if err == sql.ErrNoRows {
+		// Create new cash payment record
+		_, err = tx.Exec(`
+			INSERT INTO payments (reference, amount, currency, payment_method, status, description)
+			VALUES ($1, $2, 'USD', 'CASH', 'SUCCESS', 'Paiement espèces au guichet (groupe)')
+		`, bookingRef+"_cash", totalAmount)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la création du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	} else if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la vérification du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	} else {
+		// Payment exists, update to SUCCESS
+		_, err = tx.Exec(`UPDATE payments SET status = 'SUCCESS', updated_at = NOW() WHERE id = $1`, paymentID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la mise à jour du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	// 3. Update ALL tickets status to checked_in with guard condition
+	for _, ticketID := range ticketIDs {
+		_, err = tx.Exec(`
+			UPDATE tickets
+			SET status = 'checked_in', checked_in_at = NOW(), payment_validated = TRUE
+			WHERE id = $1
+			AND booking_id IN (SELECT id FROM bookings WHERE status = 'confirmed')`,
+			ticketID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Sprintf("❌ Erreur lors de la finalisation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 4. Send WhatsApp notification to ALL passengers
+	for i, phone := range passengerPhones {
+		if phone != "" {
+			name := passengerNames[i]
+			if name == "" {
+				name = "Passager"
+			}
+			seat := seatNumbers[i]
+			if seat == "" {
+				seat = "N/A"
+			}
+			sendCashValidationNotificationToPassenger(phone, bookingRef, name, origin, destination, seat, totalAmount)
+		}
+	}
+
+	// Build success message
+	successMsg := fmt.Sprintf("✅ *Paiement Groupe encaissé avec succès !*\n\n📌 *Référence* : %s\n👥 *Nombre de billets* : %d\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant total encaissé* : %.2f USD\n📊 *Statut* : confirmed + checked_in (Tous embarqués)\n\nTapez *menu* pour revenir au menu principal.",
+		bookingRef, len(ticketIDs), origin, destination, totalAmount)
+
+	// Reset to menu
+	s.Step = StepMenu
+	s.PreviousStep = ""
+
+	// Clean up session data
+	delete(s.Data, "controller_pay_all")
+	delete(s.Data, "controller_ticket_ids")
+	delete(s.Data, "controller_passenger_phones")
+	delete(s.Data, "controller_passenger_names")
+	delete(s.Data, "controller_seat_numbers")
+
+	return successMsg
 }
 
 // processControllerBookingResult processes a booking found by the controller

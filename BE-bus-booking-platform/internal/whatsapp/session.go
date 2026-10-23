@@ -75,6 +75,7 @@ const (
 	StepControllerValidatePayment     Step = "controller_validate_payment"
 	StepControllerDoCheckin           Step = "controller_do_checkin"
 	StepControllerCashCheckinConfirm  Step = "controller_cash_checkin_confirm"
+	StepControllerPayAllConfirm     Step = "controller_pay_all_confirm"
 	// Payment validation search sub-steps
 	StepControllerSearchByRef         Step = "controller_search_by_ref"
 	StepControllerSearchByPhone       Step = "controller_search_by_phone"
