@@ -1,4 +1,20 @@
-const BASE_URL = "/api"
+// API Client for AyaleTrans
+// Uses VITE_API_URL in production, falls back to Vite proxy (/api) in development
+
+// Get base URL from environment variable (set in Netlify)
+// In development (npm run dev), VITE_API_URL is typically not set, so we use the Vite proxy
+const getBaseUrl = (): string => {
+  const envUrl = import.meta.env.VITE_API_URL
+  if (envUrl && envUrl.trim() !== "") {
+    // Production: use the full backend URL (e.g., https://ayaletrans.onrender.com)
+    // Ensure no trailing slash
+    return envUrl.replace(/\/+$/, "")
+  }
+  // Development: use Vite proxy at /api which forwards to http://localhost:8080
+  return "/api"
+}
+
+const BASE_URL = getBaseUrl()
 
 let accessToken: string | null = localStorage.getItem("access_token")
 let refreshToken: string | null = localStorage.getItem("refresh_token")

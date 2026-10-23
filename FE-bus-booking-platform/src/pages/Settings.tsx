@@ -39,7 +39,7 @@ export default function Settings() {
   const navigate = useNavigate()
 
   useEffect(() => {
-    api.get<Profile>("/auth/profile")
+    api.get<Profile>("/user/profile")
       .then((p) => {
         setProfile(p)
         setFullName(p.full_name)
@@ -54,7 +54,7 @@ export default function Settings() {
     setSaving(true)
     setMessage(null)
     try {
-      const updated = await api.put<Profile>("/auth/profile", { full_name: fullName, phone })
+      const updated = await api.put<Profile>("/user/profile", { full_name: fullName, phone })
       setProfile(updated)
       setMessage({ type: "success", text: t("settings.profileUpdated") })
     } catch (err) {
@@ -73,7 +73,7 @@ export default function Settings() {
     setSaving(true)
     setMessage(null)
     try {
-      await api.post("/auth/change-password", {
+      await api.put("/user/password", {
         current_password: currentPassword,
         new_password: newPassword,
       })
@@ -92,7 +92,7 @@ export default function Settings() {
     if (!confirm(t("settings.deleteConfirm1"))) return
     if (!confirm(t("settings.deleteConfirm2"))) return
     try {
-      await api.delete("/auth/account")
+      await api.delete("/user/account")
       dispatch(logout())
       navigate("/")
     } catch (err) {

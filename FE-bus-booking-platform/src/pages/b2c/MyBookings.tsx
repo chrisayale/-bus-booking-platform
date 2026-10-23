@@ -24,7 +24,7 @@ export default function MyBookings() {
       : t("myBookings.cancelTicketConfirm")
     if (!confirm(message)) return
     try {
-      await api.patch(`/tickets/${ticketId}/cancel`)
+      await api.delete(`/ticket/${ticketId}`)
       setBookings(bookings.map((b) => {
         if (b.id !== bookingId) return b
         const updatedTickets = b.tickets?.map((t) =>

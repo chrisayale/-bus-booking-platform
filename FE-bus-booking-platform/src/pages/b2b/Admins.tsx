@@ -26,7 +26,7 @@ export default function Admins() {
 
   const fetchAdmins = async () => {
     try {
-      const data = await api.get<any>("/admin/users")
+      const data = await api.get<any>("/admin-users")
       // Ensure we always set array to state, even if API returns non-array data
       setAdmins(Array.isArray(data) ? data : [])
     } catch (err) {
@@ -46,7 +46,7 @@ export default function Admins() {
     setError(null)
     setSuccess(null)
     try {
-      await api.delete(`/admin/users/${adminId}`)
+      await api.delete(`/admin-users/${adminId}`)
       setSuccess("Admin account removed successfully")
       setConfirmDelete(null)
       fetchAdmins()
@@ -63,7 +63,7 @@ export default function Admins() {
     setSuccess(null)
     try {
       const newStatus = !admin.isActive
-      await api.put(`/admin/users/${admin.id}/status`, { is_active: newStatus })
+      await api.put(`/admin-users/${admin.id}`, { is_active: newStatus })
       setSuccess(`Utilisateur ${newStatus ? "activé" : "désactivé"} avec succès`)
       fetchAdmins()
     } catch (err) {
@@ -80,7 +80,7 @@ export default function Admins() {
     setSuccess(null)
 
     try {
-      await api.post("/admin/users", {
+      await api.post("/admin-users", {
         email,
         password,
         full_name: fullName,

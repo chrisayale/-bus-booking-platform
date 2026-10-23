@@ -36,7 +36,7 @@ export default function Booking() {
   const fetchBookedSeats = useCallback(async () => {
     if (!journey || confirmedBooking) return
     try {
-      const data = await api.get<{ booked_seats: string[] }>(`/journeys/${journey.id}/seats`)
+      const data = await api.get<{ booked_seats: string[] }>(`/booking/journeys/${journey.id}/seats`)
       const incoming = data.booked_seats || []
       setBookedSeats((prev) => {
         if (JSON.stringify(prev) !== JSON.stringify(incoming)) {
@@ -122,7 +122,7 @@ export default function Booking() {
         })
         booking = result.booking
       } else {
-        booking = await api.post<Booking>("/bookings", {
+        booking = await api.post<Booking>("/booking", {
           journey_id: journey.id,
           seats,
         })

@@ -17,3 +17,9 @@ Thumbs.db
 .env
 .env.local
 nul
+
+# Local Claude Code worktrees
+.claude/
+
+# Local backup patches
+sauvegarde-*.patch
