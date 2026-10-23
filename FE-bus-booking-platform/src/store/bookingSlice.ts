@@ -26,7 +26,7 @@ export const searchTrips = createAsyncThunk(
   async (params: SearchParams, { rejectWithValue }) => {
     try {
       const query = new URLSearchParams({ origin: params.origin, destination: params.destination, date: params.date })
-      return await api.get<Journey[]>(`/trips/search?${query}`)
+      return await api.get<Journey[]>(`/search/trips?${query}`)
     } catch (err: unknown) {
       return rejectWithValue((err as Error).message)
     }

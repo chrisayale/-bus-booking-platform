@@ -83,9 +83,10 @@ func main() {
 
 	// CORS
 	corsMiddleware := cors.New(cors.Options{
-		AllowedOrigins:   []string{"*"},
+		AllowedOrigins:   []string{cfg.CORSAllowedOrigin},
 		AllowedMethods:   []string{"GET", "POST", "PUT", "PATCH", "DELETE", "OPTIONS"},
 		AllowedHeaders:   []string{"Origin", "Content-Type", "Authorization"},
+		AllowCredentials: true,
 	})
 	r.Use(func(c *gin.Context) {
 		corsMiddleware.HandlerFunc(c.Writer, c.Request)

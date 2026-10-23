@@ -50,7 +50,7 @@ export const fetchProfile = createAsyncThunk(
   "auth/fetchProfile",
   async (_, { rejectWithValue }) => {
     try {
-      const user = await api.get<User>("/auth/profile")
+      const user = await api.get<User>("/user/profile")
       return user
     } catch (err: unknown) {
       clearTokens()

@@ -74,7 +74,7 @@ export default function QRScan() {
     setLoading(true)
     setResult(null)
     try {
-      const res = await api.post<{ message: string; passenger: string; seat: string }>("/scan", {
+      const res = await api.post<{ message: string; passenger: string; seat: string }>("/scan-ticket", {
         qr_token: token,
         journey_id: jId,
       })
@@ -190,7 +190,7 @@ export default function QRScan() {
     setLoading(true)
     setResult(null)
     try {
-      const res = await api.post<{ message: string; passenger: string; seat: string }>("/scan", {
+      const res = await api.post<{ message: string; passenger: string; seat: string }>("/scan-ticket", {
         qr_token: qrToken,
         journey_id: journeyId,
       })
