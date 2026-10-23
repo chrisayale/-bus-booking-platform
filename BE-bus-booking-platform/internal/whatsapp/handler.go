@@ -62,6 +62,7 @@ type BookingDetailsResult struct {
 	TotalAmount        float64   `db:"total_amount"`
 	Status             string    `db:"status"`
 	PaymentStatus      string    `db:"payment_status"`
+	PaymentMethod      string    `db:"payment_method"`
 	CreatedAt          time.Time `db:"created_at"`
 	UpdatedAt          time.Time `db:"updated_at"`
 	JourneyID          string    `db:"journey_id"`
@@ -93,24 +94,24 @@ type controllerPINResult struct {
 	AgencyName string `db:"agency_name"`
 }
 
-// verifyControllerPINWithSender verifies a controller/agent PIN using the raw sender JID
-// with flexible matching: exact phone, phone suffix, or digits-only
+// verifyControllerPINWithSender verifies a controller/agent PIN using the real MSISDN (sender_pn)
+// Primary strategy: Real phone number (sender_pn) + PIN match
+// Fallback strategies: PIN-only, LID-based matching for edge cases
 func verifyControllerPINWithSender(sender types.JID, pin string) *controllerPINResult {
 	var res controllerPINResult
 
-	// Extract potential identifiers from sender
+	// Get the real MSISDN (sender_pn) from the sender JID
+	// This resolves LID (e.g., 175247701618854@lid) to real phone (e.g., 243974645174@s.whatsapp.net)
+	realPhone := GetRealPhoneNumber(Client, sender)
 	rawUser := sender.User
-	normalizedRaw := strings.TrimPrefix(rawUser, "+")
-	// Extract only digits for flexible matching
-	digitsOnly := strings.Map(func(r rune) rune {
-		if r >= '0' && r <= '9' {
-			return r
-		}
-		return -1
-	}, normalizedRaw)
+	normalizedRealPhone := strings.TrimPrefix(realPhone, "+")
 
-	// Try multiple matching strategies in order of preference
-	// 1. Exact phone match (normalized)
+	// Log the real phone vs LID session for debugging
+	log.Printf("[PIN_AUTH] Real Phone: %s, LID Session: %s, PIN: %s", normalizedRealPhone, rawUser, pin)
+
+	// STRATEGY 1: Real phone (sender_pn) + PIN match (PRIMARY)
+	// Uses the actual phone number from WhatsApp's LID resolution
+	log.Printf("[PIN_AUTH] Strategy 1: Real phone + PIN - SELECT ... WHERE (REPLACE(phone,'+','')=$1 OR RIGHT(REGEXP_REPLACE(phone,'\\D','','g'),9)=RIGHT($1,9)) AND pin=$2 AND is_active=true AND role IN ('controller','agent')", normalizedRealPhone, pin)
 	err := DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
@@ -118,16 +119,73 @@ func verifyControllerPINWithSender(sender types.JID, pin string) *controllerPINR
 			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
 		FROM users u
 		LEFT JOIN organizations o ON u.organization_id = o.id
-		WHERE u.pin = $1 AND u.is_active = true
-		  AND REPLACE(u.phone, '+', '') = $2
-		  AND u.role IN ('controller', 'agent')
-	`, pin, normalizedRaw)
+		WHERE (
+			REPLACE(u.phone, '+', '') = $1
+			OR RIGHT(REGEXP_REPLACE(u.phone, '\D', '', 'g'), 9) = RIGHT($1, 9)
+		)
+		AND u.pin = $2
+		AND u.is_active = true
+		AND u.role IN ('controller', 'agent')
+	`, normalizedRealPhone, pin)
 	if err == nil {
+		log.Printf("[PIN_AUTH] ✓ Strategy 1 SUCCESS: Controller/agent authenticated via real phone + PIN (realPhone: %s, sender: %s, user_id: %s, agent: %s, agency: %s)", normalizedRealPhone, rawUser, res.UserID, res.AgentName, res.AgencyName)
 		return &res
 	}
+	log.Printf("[PIN_AUTH] ✗ Strategy 1 FAILED: %v", err)
 
-	// 2. Suffix match (last 9-12 digits) - handles LID vs phone format differences
-	if len(digitsOnly) >= 9 {
+	// STRATEGY 2: PIN-only match (FALLBACK - does not depend on phone number)
+	// Allows controllers to authenticate from any device/number using just their PIN
+	log.Printf("[PIN_AUTH] Strategy 2: PIN-only query - SELECT ... WHERE pin='%s' AND is_active=true AND role IN ('controller','agent')", pin)
+	err = DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent')
+	`, pin)
+	if err == nil {
+		log.Printf("[PIN_AUTH] ✓ Strategy 2 SUCCESS: Controller/agent authenticated via PIN-only match (sender: %s, user_id: %s, agent: %s, agency: %s)", rawUser, res.UserID, res.AgentName, res.AgencyName)
+		return &res
+	}
+	log.Printf("[PIN_AUTH] ✗ Strategy 2 FAILED: %v", err)
+
+	// STRATEGY 3: LID-based exact match (fallback for edge cases)
+	// Uses the raw sender LID user part for matching
+	lidNormalized := strings.TrimPrefix(rawUser, "+")
+	lidDigitsOnly := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, lidNormalized)
+
+	if len(lidDigitsOnly) >= 9 {
+		log.Printf("[PIN_AUTH] Strategy 3: LID exact match - SELECT ... WHERE pin='%s' AND REPLACE(phone,'+','')='%s'", pin, lidDigitsOnly)
+		err = DB.Get(&res, `
+			SELECT
+				u.id AS user_id,
+				COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+				COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+			FROM users u
+			LEFT JOIN organizations o ON u.organization_id = o.id
+			WHERE u.pin = $1 AND u.is_active = true
+			  AND REPLACE(u.phone, '+', '') = $2
+			  AND u.role IN ('controller', 'agent')
+		`, pin, lidDigitsOnly)
+		if err == nil {
+			log.Printf("[PIN_AUTH] ✓ Strategy 3 SUCCESS: Controller/agent authenticated via LID exact match (sender: %s, user_id: %s)", rawUser, res.UserID)
+			return &res
+		}
+		log.Printf("[PIN_AUTH] ✗ Strategy 3 FAILED: %v", err)
+	}
+
+	// STRATEGY 4: LID suffix match (last 9 digits)
+	if len(lidDigitsOnly) >= 9 {
+		suffix := lidDigitsOnly[len(lidDigitsOnly)-9:]
+		log.Printf("[PIN_AUTH] Strategy 4: LID suffix match (last 9 digits=%s) - SELECT ... WHERE pin='%s' AND REPLACE(phone,'+','') LIKE '%%%s'", suffix, pin, suffix)
 		err = DB.Get(&res, `
 			SELECT
 				u.id AS user_id,
@@ -138,34 +196,28 @@ func verifyControllerPINWithSender(sender types.JID, pin string) *controllerPINR
 			WHERE u.pin = $1 AND u.is_active = true
 			  AND REPLACE(u.phone, '+', '') LIKE '%' || $2
 			  AND u.role IN ('controller', 'agent')
-		`, pin, digitsOnly[len(digitsOnly)-9:]) // Match last 9 digits
+		`, pin, suffix)
 		if err == nil {
-			log.Printf("Controller/agent authenticated via suffix match (sender: %s)", rawUser)
+			log.Printf("[PIN_AUTH] ✓ Strategy 4 SUCCESS: Controller/agent authenticated via LID suffix match (sender: %s, user_id: %s)", rawUser, res.UserID)
 			return &res
 		}
+		log.Printf("[PIN_AUTH] ✗ Strategy 4 FAILED: %v", err)
 	}
 
-	// 3. Digits-only match (full digits comparison)
-	if len(digitsOnly) > 0 {
-		err = DB.Get(&res, `
-			SELECT
-				u.id AS user_id,
-				COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
-				COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
-			FROM users u
-			LEFT JOIN organizations o ON u.organization_id = o.id
-			WHERE u.pin = $1 AND u.is_active = true
-			  AND REGEXP_REPLACE(u.phone, '\D', '', 'g') = $2
-			  AND u.role IN ('controller', 'agent')
-		`, pin, digitsOnly)
-		if err == nil {
-			log.Printf("Controller/agent authenticated via digits-only match (sender: %s)", rawUser)
-			return &res
-		}
-	}
+	log.Printf("[PIN_AUTH] All strategies failed for realPhone=%s, sender=%s, pin=%s", normalizedRealPhone, rawUser, pin)
+	return nil
+}
 
-	// 4. Fallback: PIN-only match (last resort for unresolved LIDs)
-	err = DB.Get(&res, `
+// Legacy function kept for compatibility
+func verifyControllerPIN(phone string, pin string) *controllerPINResult {
+	var res controllerPINResult
+	normalizedPhone := strings.TrimPrefix(phone, "+")
+
+	log.Printf("[PIN_AUTH_LEGACY] Starting PIN verification for phone=%s, pin=%s", phone, pin)
+
+	// STRATEGY 1: PIN-only match (PRIMARY)
+	log.Printf("[PIN_AUTH_LEGACY] Strategy 1: PIN-only query - SELECT ... WHERE pin='%s' AND is_active=true AND role IN ('controller','agent')", pin)
+	err := DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
 			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
@@ -176,19 +228,14 @@ func verifyControllerPINWithSender(sender types.JID, pin string) *controllerPINR
 		  AND u.role IN ('controller', 'agent')
 	`, pin)
 	if err == nil {
-		log.Printf("Controller/agent authenticated via PIN fallback (sender: %s)", rawUser)
+		log.Printf("[PIN_AUTH_LEGACY] ✓ Strategy 1 SUCCESS: Controller/agent authenticated via PIN-only match (phone: %s, user_id: %s)", phone, res.UserID)
 		return &res
 	}
+	log.Printf("[PIN_AUTH_LEGACY] ✗ Strategy 1 FAILED: %v", err)
 
-	return nil
-}
-
-// Legacy function kept for compatibility
-func verifyControllerPIN(phone string, pin string) *controllerPINResult {
-	var res controllerPINResult
-	normalizedPhone := strings.TrimPrefix(phone, "+")
-
-	err := DB.Get(&res, `
+	// STRATEGY 2: Exact phone + PIN match
+	log.Printf("[PIN_AUTH_LEGACY] Strategy 2: Exact phone match - SELECT ... WHERE pin='%s' AND REPLACE(phone,'+','')='%s'", pin, normalizedPhone)
+	err = DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
 			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
@@ -200,24 +247,12 @@ func verifyControllerPIN(phone string, pin string) *controllerPINResult {
 		  AND u.role IN ('controller', 'agent')
 	`, pin, normalizedPhone)
 	if err == nil {
+		log.Printf("[PIN_AUTH_LEGACY] ✓ Strategy 2 SUCCESS: Controller/agent authenticated via exact phone match (phone: %s, user_id: %s)", phone, res.UserID)
 		return &res
 	}
+	log.Printf("[PIN_AUTH_LEGACY] ✗ Strategy 2 FAILED: %v", err)
 
-	err = DB.Get(&res, `
-		SELECT
-			u.id AS user_id,
-			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
-			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
-		FROM users u
-		LEFT JOIN organizations o ON u.organization_id = o.id
-		WHERE u.pin = $1 AND u.is_active = true
-		  AND u.role IN ('controller', 'agent')
-	`, pin)
-	if err == nil {
-		log.Printf("Controller/agent authenticated via PIN fallback (phone: %s)", phone)
-		return &res
-	}
-
+	log.Printf("[PIN_AUTH_LEGACY] All strategies failed for phone=%s, pin=%s", phone, pin)
 	return nil
 }
 
@@ -227,8 +262,29 @@ func verifyControllerPINByPin(phone string, pin string) *controllerPINResult {
 	// Normalize phone number (remove leading + if present)
 	normalizedPhone := strings.TrimPrefix(phone, "+")
 
-	// First try exact phone + PIN match
+	log.Printf("[PIN_AUTH_BYPIN] Starting PIN verification for phone=%s, pin=%s", phone, pin)
+
+	// STRATEGY 1: PIN-only match (PRIMARY)
+	log.Printf("[PIN_AUTH_BYPIN] Strategy 1: PIN-only query - SELECT ... WHERE pin='%s' AND is_active=true AND role IN ('controller','agent')", pin)
 	err := DB.Get(&res, `
+		SELECT
+			u.id AS user_id,
+			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
+			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
+		FROM users u
+		LEFT JOIN organizations o ON u.organization_id = o.id
+		WHERE u.pin = $1 AND u.is_active = true
+		  AND u.role IN ('controller', 'agent')
+	`, pin)
+	if err == nil {
+		log.Printf("[PIN_AUTH_BYPIN] ✓ Strategy 1 SUCCESS: Controller/agent authenticated via PIN-only match (phone: %s, user_id: %s)", phone, res.UserID)
+		return &res
+	}
+	log.Printf("[PIN_AUTH_BYPIN] ✗ Strategy 1 FAILED: %v", err)
+
+	// STRATEGY 2: Exact phone + PIN match
+	log.Printf("[PIN_AUTH_BYPIN] Strategy 2: Exact phone match - SELECT ... WHERE pin='%s' AND REPLACE(phone,'+','')='%s'", pin, normalizedPhone)
+	err = DB.Get(&res, `
 		SELECT
 			u.id AS user_id,
 			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
@@ -240,25 +296,12 @@ func verifyControllerPINByPin(phone string, pin string) *controllerPINResult {
 		  AND u.role IN ('controller', 'agent')
 	`, pin, normalizedPhone)
 	if err == nil {
+		log.Printf("[PIN_AUTH_BYPIN] ✓ Strategy 2 SUCCESS: Controller/agent authenticated via exact phone match (phone: %s, user_id: %s)", phone, res.UserID)
 		return &res
 	}
+	log.Printf("[PIN_AUTH_BYPIN] ✗ Strategy 2 FAILED: %v", err)
 
-	// Fallback: try PIN-only match (for cases where session phone is a LID that can't be resolved)
-	err = DB.Get(&res, `
-		SELECT
-			u.id AS user_id,
-			COALESCE(NULLIF(u.full_name, ''), COALESCE(NULLIF(u.email, ''), 'Agent')) AS agent_name,
-			COALESCE(NULLIF(o.name, ''), 'Aucune agence assignée') AS agency_name
-		FROM users u
-		LEFT JOIN organizations o ON u.organization_id = o.id
-		WHERE u.pin = $1 AND u.is_active = true
-		  AND u.role IN ('controller', 'agent')
-	`, pin)
-	if err == nil {
-		log.Printf("Controller/agent authenticated via PIN fallback (phone: %s)", phone)
-		return &res
-	}
-
+	log.Printf("[PIN_AUTH_BYPIN] All strategies failed for phone=%s, pin=%s", phone, pin)
 	return nil
 }
 
@@ -980,7 +1023,7 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			guestName := s.Passengers[0].Name
 			guestEmail := fmt.Sprintf("whatsapp+%s@ayaletrans.local", phone)
 
-			tickets, ref, err := CreateGuestBooking(s.SelectedJourneyID, guestName, guestEmail, s.Passengers, AppURL)
+			tickets, ref, err := CreateGuestBooking(s.SelectedJourneyID, guestName, guestEmail, s.Passengers, AppURL, "cash")
 			if err != nil {
 				if s.NotificationSent {
 					resetSession(phone)
@@ -1844,12 +1887,20 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 		return searchBookingForPaymentValidation(s, input)
 
 	case StepControllerSearchByPhone:
-		// Search by passenger phone
+		// Search by passenger phone - returns two lists (unpaid and paid)
+		// Check if we already have search results in session (user is making a selection)
+		if s.Data != nil {
+			if _, hasResults := s.Data["controller_unpaid_results"]; hasResults {
+				// User is selecting from the lists
+				return handleControllerPhoneSelection(s, text)
+			}
+		}
+
 		input := strings.TrimSpace(text)
 		if input == "" {
 			return getPromptForStep(s)
 		}
-		return searchBookingForPaymentValidation(s, input)
+		return searchBookingsByPhoneForController(s, input)
 
 	case StepControllerSearchByName:
 		// Search by passenger name
@@ -2478,6 +2529,25 @@ func processCashPaymentAndCheckin(s *Session) string {
 		return fmt.Sprintf("❌ Erreur lors de la finalisation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
 	}
 
+	// 4. Send WhatsApp notification to passenger
+	passengerPhone := ""
+	totalAmount := 0.0
+	if s.Data != nil {
+		if phone, ok := s.Data["controller_passenger_phone"].(string); ok {
+			passengerPhone = phone
+		}
+		if amount, ok := s.Data["controller_total_amount"].(float64); ok {
+			totalAmount = amount
+		}
+	}
+	if passengerPhone == "" {
+		// Try to get from ticket data
+		var phoneStr string
+		DB.Get(&phoneStr, `SELECT passenger_phone FROM tickets WHERE booking_id = $1 LIMIT 1`, bookingID)
+		passengerPhone = phoneStr
+	}
+	sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passengerName, origin, destination, seatNumber, totalAmount)
+
 	// Build success message
 	successMsg := fmt.Sprintf("✅ *Encaissement Cash + Check-in effectués avec succès !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n💺 *Siège* : N° %s\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant encaissé* : %.2f USD\n📊 *Statut* : confirmed + checked_in (Embarqué)\n\nTapez *menu* pour revenir au menu principal.",
 		bookingRef, passengerName, seatNumber, origin, destination, 0.0)
@@ -2579,6 +2649,25 @@ func processCashPaymentOnly(s *Session) string {
 		return fmt.Sprintf("❌ Erreur lors de la finalisation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
 	}
 
+	// Send WhatsApp notification to passenger
+	passengerPhone := ""
+	totalAmount := 0.0
+	if s.Data != nil {
+		if phone, ok := s.Data["controller_passenger_phone"].(string); ok {
+			passengerPhone = phone
+		}
+		if amount, ok := s.Data["controller_total_amount"].(float64); ok {
+			totalAmount = amount
+		}
+	}
+	if passengerPhone == "" {
+		// Try to get from ticket data
+		var phoneStr string
+		DB.Get(&phoneStr, `SELECT passenger_phone FROM tickets WHERE booking_id = $1 LIMIT 1`, bookingID)
+		passengerPhone = phoneStr
+	}
+	sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passengerName, origin, destination, seatNumber, totalAmount)
+
 	// Build success message
 	successMsg := fmt.Sprintf("✅ *Paiement Cash encaissé avec succès !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n💺 *Siège* : N° %s\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant encaissé* : %.2f USD\n📊 *Statut* : confirmed (Payé)\n\nLe passager pourra faire son check-in ultérieurement.\n\nTapez *menu* pour revenir au menu principal.",
 		bookingRef, passengerName, seatNumber, origin, destination, 0.0)
@@ -2659,6 +2748,299 @@ func searchBookingForPaymentValidation(s *Session, input string) string {
 	return processControllerBookingResult(s, bookingResult)
 }
 
+// searchBookingsByPhoneForController searches for ALL bookings by passenger phone
+// Returns separate lists for unpaid (cash pending) and paid/confirmed bookings
+func searchBookingsByPhoneForController(s *Session, phoneInput string) string {
+	// Normalize phone input - keep only digits
+	inputDigits := strings.Map(func(r rune) rune {
+		if r >= '0' && r <= '9' {
+			return r
+		}
+		return -1
+	}, strings.TrimPrefix(phoneInput, "+"))
+
+	// Log the search for debugging
+	log.Printf("[CONTROLLER_SEARCH] Phone input: %s, Normalized: %s", phoneInput, inputDigits)
+
+	// Query for UNPAID bookings (status=pending, payment_method=cash)
+	// Uses flexible matching: compares normalized digits of passenger_phone with normalized input
+	var unpaidResults []BookingDetailsResult
+	err := DB.Select(&unpaidResults, `
+		SELECT
+			b.id AS booking_id,
+			b.id AS id,
+			b.booking_reference,
+			b.total_amount,
+			b.status,
+			b.status AS payment_status,
+			b.payment_method,
+			t.id AS ticket_id,
+			t.passenger_name,
+			t.passenger_phone,
+			t.seat_number,
+			t.price,
+			o.name AS organization_name,
+			r.origin,
+			r.destination,
+			j.departure_date::text AS departure_date,
+			j.departure_time::text AS departure_time
+		FROM tickets t
+		JOIN bookings b ON t.booking_id = b.id
+		JOIN journeys j ON t.journey_id = j.id
+		JOIN routes r ON j.route_id = r.id
+		JOIN organizations o ON j.organization_id = o.id
+		WHERE b.status = 'pending'
+		  AND b.payment_method = 'cash'
+		  AND (
+			-- Normalized exact match or suffix/partial match
+			REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') = $1
+			OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') LIKE '%' || $1
+			OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') LIKE $1 || '%'
+		  )
+		ORDER BY b.created_at DESC
+		LIMIT 20
+	`, inputDigits)
+
+	if err != nil {
+		log.Printf("[CONTROLLER_SEARCH] Unpaid query error: %v", err)
+		return fmt.Sprintf("❌ Erreur lors de la recherche : %v\n\nTapez *menu* pour annuler.", err)
+	}
+
+	// Query for PAID/CONFIRMED bookings (status=confirmed or paid)
+	var paidResults []BookingDetailsResult
+	err = DB.Select(&paidResults, `
+		SELECT
+			b.id AS booking_id,
+			b.id AS id,
+			b.booking_reference,
+			b.total_amount,
+			b.status,
+			b.status AS payment_status,
+			b.payment_method,
+			t.id AS ticket_id,
+			t.passenger_name,
+			t.passenger_phone,
+			t.seat_number,
+			t.price,
+			o.name AS organization_name,
+			r.origin,
+			r.destination,
+			j.departure_date::text AS departure_date,
+			j.departure_time::text AS departure_time
+		FROM tickets t
+		JOIN bookings b ON t.booking_id = b.id
+		JOIN journeys j ON t.journey_id = j.id
+		JOIN routes r ON j.route_id = r.id
+		JOIN organizations o ON j.organization_id = o.id
+		WHERE b.status IN ('confirmed', 'paid')
+		  AND (
+			-- Normalized exact match or suffix/partial match
+			REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') = $1
+			OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') LIKE '%' || $1
+			OR REGEXP_REPLACE(t.passenger_phone, '\D', '', 'g') LIKE $1 || '%'
+		  )
+		ORDER BY b.created_at DESC
+		LIMIT 20
+	`, inputDigits)
+
+	if err != nil {
+		log.Printf("[CONTROLLER_SEARCH] Paid query error: %v", err)
+		return fmt.Sprintf("❌ Erreur lors de la recherche : %v\n\nTapez *menu* pour annuler.", err)
+	}
+
+	// Store results in session for selection
+	if s.Data == nil {
+		s.Data = make(map[string]interface{})
+	}
+	s.Data["controller_unpaid_results"] = unpaidResults
+	s.Data["controller_paid_results"] = paidResults
+	s.Data["controller_search_type"] = "phone"
+
+	// Format the two lists using card-based layout grouped by booking reference
+	var b strings.Builder
+
+	// Helper function to format departure time
+	formatDeparture := func(dateStr, timeStr string) string {
+		if dateStr == "" || timeStr == "" {
+			return "N/A"
+		}
+		// Format: "2026-10-23" + "06:30:00" -> "23/10 à 06h30"
+		if len(dateStr) >= 10 && len(timeStr) >= 5 {
+			day := dateStr[8:10]
+			month := dateStr[5:7]
+			hour := timeStr[0:5]
+			return fmt.Sprintf("%s/%s à %sh", day, month, hour)
+		}
+		return dateStr + " " + timeStr
+	}
+
+	// Helper to group results by booking reference and render cards
+	renderBookingCards := func(results []BookingDetailsResult, isPaid bool, startNum int) (string, int) {
+		if len(results) == 0 {
+			return "", startNum
+		}
+
+		// Group by booking reference
+		type groupedBooking struct {
+			BookingRef      string
+			TotalAmount     float64
+			AgencyName      string
+			Origin          string
+			Destination     string
+			DepartureDate   string
+			DepartureTime   string
+			Tickets         []BookingDetailsResult
+		}
+
+		bookingMap := make(map[string]*groupedBooking)
+		bookingOrder := []string{}
+
+		for _, result := range results {
+			if _, exists := bookingMap[result.BookingReference]; !exists {
+				bookingMap[result.BookingReference] = &groupedBooking{
+					BookingRef:    result.BookingReference,
+					TotalAmount:   result.TotalAmount,
+					AgencyName:    result.OrganizationName,
+					Origin:        result.Origin,
+					Destination:   result.Destination,
+					DepartureDate: result.DepartureDate,
+					DepartureTime: result.DepartureTime,
+					Tickets:       []BookingDetailsResult{},
+				}
+				bookingOrder = append(bookingOrder, result.BookingReference)
+			}
+			bookingMap[result.BookingReference].Tickets = append(bookingMap[result.BookingReference].Tickets, result)
+		}
+
+		var cardBuilder strings.Builder
+		num := startNum
+
+		for _, ref := range bookingOrder {
+			gb := bookingMap[ref]
+			departureStr := formatDeparture(gb.DepartureDate, gb.DepartureTime)
+
+			cardBuilder.WriteString(fmt.Sprintf("📌 *Réservation* : %s\n", gb.BookingRef))
+			cardBuilder.WriteString(fmt.Sprintf("🏢 *Agence* : %s\n", gb.AgencyName))
+			cardBuilder.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", gb.Origin, gb.Destination))
+			cardBuilder.WriteString(fmt.Sprintf("📅 *Départ* : %s\n", departureStr))
+			cardBuilder.WriteString(fmt.Sprintf("💰 *Total* : %.2f USD\n\n", gb.TotalAmount))
+
+			cardBuilder.WriteString("👥 *Passagers / Sièges* :\n")
+			for _, ticket := range gb.Tickets {
+				seatNum := ticket.SeatNumber
+				if seatNum == "" {
+					seatNum = "N/A"
+				}
+				passengerName := ticket.PassengerName
+				if passengerName == "" {
+					passengerName = "Passager"
+				}
+
+				actionLabel := "valider"
+				actionPrefix := ""
+				if isPaid {
+					actionLabel = "Check-in"
+					actionPrefix = "P"
+				}
+				cardBuilder.WriteString(fmt.Sprintf("  • %d 👤 %s — 💺 Siège %s (Tapez **%s%d** pour %s)\n",
+					num, passengerName, seatNum, actionPrefix, num, actionLabel))
+				num++
+			}
+			cardBuilder.WriteString("\n")
+		}
+
+		return cardBuilder.String(), num
+	}
+
+	// UNPAID list - Cash pending
+	b.WriteString("🔴 *BILLETS IMPAYÉS (Paiement Cash en attente)*\n\n")
+	unpaidCards, nextNum := renderBookingCards(unpaidResults, false, 1)
+	if unpaidCards == "" {
+		b.WriteString("  Aucun billet impayé trouvé.\n\n")
+	} else {
+		b.WriteString(unpaidCards)
+	}
+
+	// PAID list - Confirmed/Paid
+	b.WriteString("🟢 *BILLETS PAYÉS / CONFIRMÉS*\n\n")
+	paidCards, _ := renderBookingCards(paidResults, true, nextNum)
+	if paidCards == "" {
+		b.WriteString("  Aucun billet payé trouvé.\n\n")
+	} else {
+		b.WriteString(paidCards)
+	}
+
+	if len(unpaidResults) == 0 && len(paidResults) == 0 {
+		b.WriteString(fmt.Sprintf("❌ Aucune réservation trouvée pour le numéro : *%s*\n\n", phoneInput))
+		b.WriteString("Numéro recherché (normalisé) : " + inputDigits + "\n\n")
+		b.WriteString("Veuillez vérifier le numéro et réessayer, ou tapez *menu* pour annuler.")
+		return b.String()
+	}
+
+	b.WriteString("Tapez le numéro pour sélectionner un billet :\n")
+	b.WriteString("• Pour les impayés : tapez le numéro (1, 2, ...)\n")
+	b.WriteString("• Pour les payés : tapez P + numéro (ex: P1, P2)\n\n")
+	b.WriteString("0️⃣0️⃣ Précédent\n")
+	b.WriteString("0️⃣1️⃣ Suivant\n")
+
+	return b.String()
+}
+
+// handleControllerPhoneSelection handles user selection from the phone search results
+func handleControllerPhoneSelection(s *Session, input string) string {
+	input = strings.TrimSpace(strings.ToUpper(input))
+
+	unpaidResults, ok1 := s.Data["controller_unpaid_results"].([]BookingDetailsResult)
+	paidResults, ok2 := s.Data["controller_paid_results"].([]BookingDetailsResult)
+
+	if !ok1 || !ok2 {
+		// Results not in session, restart search
+		delete(s.Data, "controller_unpaid_results")
+		delete(s.Data, "controller_paid_results")
+		delete(s.Data, "controller_search_type")
+		return searchBookingsByPhoneForController(s, input)
+	}
+
+	// Handle navigation
+	if input == "00" || input == "0️⃣0️⃣" || strings.ToLower(input) == "precedent" {
+		s.PreviousStep = s.Step
+		s.Step = StepControllerValidatePayment
+		return getPromptForStep(s)
+	}
+	if input == "01" || input == "0️⃣1️⃣" || strings.ToLower(input) == "suivant" {
+		return "Navigation suivante non disponible pour cette recherche.\n\nTapez *menu* pour retourner au menu principal."
+	}
+
+	// Check if selection is for paid list (P prefix)
+	isPaidSelection := strings.HasPrefix(input, "P")
+	selectionStr := strings.TrimPrefix(input, "P")
+	selectionNum, err := strconv.Atoi(selectionStr)
+	if err != nil || selectionNum < 1 {
+		return "❌ Sélection invalide. Tapez le numéro du billet (ex: 1 ou P1), ou *menu* pour annuler."
+	}
+
+	var selectedResult *BookingDetailsResult
+	if isPaidSelection {
+		if selectionNum > len(paidResults) {
+			return fmt.Sprintf("❌ Numéro invalide. Il y a %d billet(s) payé(s).\n\nTapez *menu* pour annuler.", len(paidResults))
+		}
+		selectedResult = &paidResults[selectionNum-1]
+	} else {
+		if selectionNum > len(unpaidResults) {
+			return fmt.Sprintf("❌ Numéro invalide. Il y a %d billet(s) impayé(s).\n\nTapez *menu* pour annuler.", len(unpaidResults))
+		}
+		selectedResult = &unpaidResults[selectionNum-1]
+	}
+
+	// Clear search results from session
+	delete(s.Data, "controller_unpaid_results")
+	delete(s.Data, "controller_paid_results")
+	delete(s.Data, "controller_search_type")
+
+	// Process the selected booking
+	return processControllerBookingResult(s, *selectedResult)
+}
+
 // processControllerBookingResult processes a booking found by the controller
 // Implements smart ticket state detection: pending (cash), confirmed, checked_in
 func processControllerBookingResult(s *Session, bookingResult BookingDetailsResult) string {
@@ -2697,6 +3079,7 @@ func processControllerBookingResult(s *Session, bookingResult BookingDetailsResu
 	s.Data["controller_booking_ref"] = bookingResult.BookingReference
 	s.Data["controller_ticket_id"] = bookingResult.TicketID
 	s.Data["controller_passenger_name"] = passengerName
+	s.Data["controller_passenger_phone"] = bookingResult.PassengerPhone
 	s.Data["controller_seat_number"] = seatNumber
 	s.Data["controller_origin"] = bookingResult.Origin
 	s.Data["controller_destination"] = bookingResult.Destination
@@ -3115,4 +3498,27 @@ var frenchMonths = map[string]int{
 	"janvier": 1, "février": 2, "fevrier": 2, "mars": 3, "avril": 4,
 	"mai": 5, "juin": 6, "juillet": 7, "août": 8, "aout": 8,
 	"septembre": 9, "octobre": 10, "novembre": 11, "décembre": 12, "decembre": 12,
+}
+
+// sendCashValidationNotificationToPassenger sends a WhatsApp notification to the passenger
+// when a controller validates their cash payment
+func sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passengerName, origin, destination, seatNumber string, amount float64) {
+	if passengerPhone == "" {
+		log.Printf("[CASH VALIDATION] No passenger phone available for notification")
+		return
+	}
+
+	cleanedPhone := CleanPhoneNumber(passengerPhone)
+	if len(cleanedPhone) != 12 {
+		log.Printf("[CASH VALIDATION] Invalid passenger phone format: %s", passengerPhone)
+		return
+	}
+
+	jid := types.NewJID(cleanedPhone, "s.whatsapp.net")
+
+	message := fmt.Sprintf("✅ *Paiement Cash Validé par le Contrôleur !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant* : %.2f USD\n📊 *Statut* : Confirmé & Payé\n\nVotre billet est maintenant validé pour l'embarquement.",
+		bookingRef, passengerName, origin, destination, amount)
+
+	SendText(jid, message)
+	log.Printf("[CASH VALIDATION] Notification sent to passenger %s for booking %s", cleanedPhone, bookingRef)
 }

@@ -150,7 +150,7 @@ type CreatedTicket struct {
 	BookingStatus  string `db:"booking_status"`
 }
 
-func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []PassengerDraft, appURL string) ([]CreatedTicket, string, error) {
+func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []PassengerDraft, appURL, paymentMethod string) ([]CreatedTicket, string, error) {
 	tx, err := DB.Beginx()
 	if err != nil {
 		return nil, "", err
@@ -181,12 +181,18 @@ func CreateGuestBooking(journeyID, guestName, guestEmail string, passengers []Pa
 		return nil, "", err
 	}
 
+	// Determine booking status based on payment method
+	bookingStatus := "confirmed"
+	if paymentMethod == "cash" {
+		bookingStatus = "pending"
+	}
+
 	var bookingID string
 	err = tx.QueryRowx(`
-		INSERT INTO bookings (booking_reference, guest_email, guest_name, total_amount, status)
-		VALUES ($1, $2, $3, $4, 'confirmed')
+		INSERT INTO bookings (booking_reference, guest_email, guest_name, total_amount, status, payment_method)
+		VALUES ($1, $2, $3, $4, $5, $6)
 		RETURNING id`,
-		bookingRef, guestEmail, guestName, totalAmount,
+		bookingRef, guestEmail, guestName, totalAmount, bookingStatus, paymentMethod,
 	).Scan(&bookingID)
 	if err != nil {
 		return nil, "", err

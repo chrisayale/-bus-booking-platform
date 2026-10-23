@@ -507,7 +507,7 @@ func CompleteBookingFromPayment(p *payments.Payment) error {
 	cleanedPhone := CleanPhoneNumber(meta.GuestPhone)
 	jid := types.NewJID(cleanedPhone, "s.whatsapp.net")
 
-	tickets, ref, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL)
+	tickets, ref, err := CreateGuestBooking(meta.JourneyID, meta.GuestName, meta.GuestEmail, meta.Passengers, AppURL, mapPaymentType(meta.PaymentType))
 	if err != nil {
 		SendText(jid, fmt.Sprintf(
 			"⚠️ Votre paiement a été confirmé, mais un problème est survenu lors de la création de votre billet : %s\nContactez le support. Référence paiement : %s",
@@ -659,4 +659,18 @@ func StartPaymentTimeoutWorker() {
 			}
 		}
 	}()
+}
+
+// mapPaymentType maps the legacy payment type string to the new payment method values
+func mapPaymentType(paymentType string) string {
+	switch paymentType {
+	case "carte":
+		return "card"
+	case "mobile money":
+		return "mobile_money"
+	case "cash":
+		return "cash"
+	default:
+		return "mobile_money" // default for backward compatibility
+	}
 }

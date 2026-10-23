@@ -115,6 +115,7 @@ type Booking struct {
 	GuestName        *string    `db:"guest_name" json:"guest_name,omitempty"`
 	TotalAmount      float64    `db:"total_amount" json:"total_amount"`
 	Status           string     `db:"status" json:"status"`
+	PaymentMethod    string     `db:"payment_method" json:"payment_method,omitempty"`
 	ExpiresAt        *time.Time `db:"expires_at" json:"expires_at,omitempty"`
 	FirstPassengerName string   `db:"first_passenger_name" json:"-"`
 	CreatedAt        time.Time  `db:"created_at" json:"created_at"`

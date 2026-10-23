@@ -20,6 +20,7 @@ const (
 const (
 	MethodMobileMoney = "MOBILE_MONEY"
 	MethodCard        = "CARD"
+	MethodCash        = "CASH"
 )
 
 // Payment correspond à une ligne de la table `payments`.
