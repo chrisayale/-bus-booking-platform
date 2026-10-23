@@ -2415,6 +2415,10 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			// Handle pay all tickets confirmation
 			return processControllerPayAllConfirm(s, text)
 
+		case StepControllerActionChoice:
+			// Handle unified action choice for both single ticket and pay all
+			return processControllerActionChoice(s, text)
+
 		default:
 			return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
 		}
@@ -3086,7 +3090,7 @@ func handleControllerPhoneSelection(s *Session, input string) string {
 }
 
 // handleControllerPayAllSelection handles the "Pay All" selection for a booking group
-// Processes cash payment for ALL pending tickets in the selected booking
+// Stores ticket IDs in session and redirects to unified action sub-menu
 func handleControllerPayAllSelection(s *Session, groupIndex int, unpaidResults []BookingDetailsResult) string {
 	// Group unpaid results by booking reference to find the target group
 	bookingMap := make(map[string][]BookingDetailsResult)
@@ -3153,13 +3157,16 @@ func handleControllerPayAllSelection(s *Session, groupIndex int, unpaidResults [
 	delete(s.Data, "controller_paid_results")
 	delete(s.Data, "controller_search_type")
 
-	// Show confirmation for pay all
+	// Show unified action sub-menu
+	s.PreviousStep = s.Step
+	s.Step = StepControllerActionChoice
+
 	var b strings.Builder
-	b.WriteString(fmt.Sprintf("💳 *Paiement Groupe - Réservation %s*\n\n", bookingRef))
-	b.WriteString(fmt.Sprintf("👤 *Passager principal* : %s\n", passengerName))
+	b.WriteString(fmt.Sprintf("💳 *Action requise pour Réservation %s*\n\n", bookingRef))
+	b.WriteString(fmt.Sprintf("👥 *Groupe* : %d billet(s)\n", len(tickets)))
 	b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", origin, destination))
 	b.WriteString(fmt.Sprintf("📅 *Départ* : %s\n", formatDate(firstTicket.DepartureDate)))
-	b.WriteString(fmt.Sprintf("💰 *Montant total* : %.2f USD\n\n", totalAmount))
+	b.WriteString(fmt.Sprintf("\n💰 *Montant total* : %.2f USD\n\n", totalAmount))
 
 	b.WriteString("📋 *Billets concernés* :\n")
 	for i, t := range tickets {
@@ -3174,13 +3181,10 @@ func handleControllerPayAllSelection(s *Session, groupIndex int, unpaidResults [
 		b.WriteString(fmt.Sprintf("  %d️⃣ %s — 💺 Siège %s (💵 %.2f USD)\n", i+1, name, seat, t.Price))
 	}
 
-	b.WriteString("\nConfirmez-vous le paiement de TOUS ces billets ?\n")
-	b.WriteString("1️⃣ Oui, payer tout le groupe\n")
-	b.WriteString("2️⃣ Non, retour\n")
-
-	// Set step to confirmation
-	s.PreviousStep = s.Step
-	s.Step = StepControllerPayAllConfirm
+	b.WriteString("\nSélectionnez une action :\n")
+	b.WriteString("1️⃣ Encaisser le Cash ET valider le Check-in (Recommandé)\n")
+	b.WriteString("2️⃣ Encaisser le Cash seulement\n")
+	b.WriteString("3️⃣ Annuler / Retour\n")
 
 	return b.String()
 }
@@ -3332,6 +3336,371 @@ func processCashPaymentAllTickets(s *Session) string {
 	return successMsg
 }
 
+// processControllerActionChoice handles the unified action sub-menu after ticket/group selection
+// Shows 3 options: Cash+Checkin, Cash Only, Cancel
+func processControllerActionChoice(s *Session, input string) string {
+	input = strings.TrimSpace(input)
+
+	// Check if this is a group payment (pay all) or single ticket
+	isPayAll := false
+	if s.Data != nil {
+		if val, ok := s.Data["controller_pay_all"].(bool); ok {
+			isPayAll = val
+		}
+	}
+
+	switch input {
+	case "1", "1️⃣": // Encaisser le Cash ET valider le Check-in (Recommandé)
+		if isPayAll {
+			return processCashPaymentAndCheckinUnified(s, true)
+		}
+		return processCashPaymentAndCheckinUnified(s, false)
+
+	case "2", "2️⃣": // Encaisser le Cash seulement
+		if isPayAll {
+			return processCashPaymentOnlyUnified(s, true)
+		}
+		return processCashPaymentOnlyUnified(s, false)
+
+	case "3", "3️⃣", "0", "0️⃣", "retour", "annuler": // Annuler / Retour
+		// Go back to controller action menu
+		s.PreviousStep = s.Step
+		s.Step = StepControllerSelectAction
+		var menu strings.Builder
+		menu.WriteString("↩️ *Opération annulée.*\n\n")
+		menu.WriteString("Sélectionnez une action :\n")
+		menu.WriteString("1️⃣ Valider le paiement\n")
+		menu.WriteString("2️⃣ Faire le check-in\n")
+		return menu.String()
+
+	default:
+		return "Choix invalide. Veuillez sélectionner 1, 2 ou 3, ou tapez *menu* pour annuler."
+	}
+}
+
+// processCashPaymentAndCheckinUnified processes cash payment and check-in in one step
+// Handles both single ticket (isPayAll=false) and group tickets (isPayAll=true)
+func processCashPaymentAndCheckinUnified(s *Session, isPayAll bool) string {
+	bookingID := ""
+	bookingRef := ""
+	passengerName := ""
+	origin := ""
+	destination := ""
+	totalAmount := 0.0
+	var ticketIDs []string
+	var passengerPhones []string
+	var passengerNames []string
+	var seatNumbers []string
+
+	if s.Data != nil {
+		if id, ok := s.Data["controller_booking_id"].(string); ok {
+			bookingID = id
+		}
+		if ref, ok := s.Data["controller_booking_ref"].(string); ok {
+			bookingRef = ref
+		}
+		if name, ok := s.Data["controller_passenger_name"].(string); ok {
+			passengerName = name
+		}
+		if org, ok := s.Data["controller_origin"].(string); ok {
+			origin = org
+		}
+		if dest, ok := s.Data["controller_destination"].(string); ok {
+			destination = dest
+		}
+		if amount, ok := s.Data["controller_total_amount"].(float64); ok {
+			totalAmount = amount
+		}
+
+		if isPayAll {
+			if ids, ok := s.Data["controller_ticket_ids"].([]string); ok {
+				ticketIDs = ids
+			}
+			if phones, ok := s.Data["controller_passenger_phones"].([]string); ok {
+				passengerPhones = phones
+			}
+			if names, ok := s.Data["controller_passenger_names"].([]string); ok {
+				passengerNames = names
+			}
+			if seats, ok := s.Data["controller_seat_numbers"].([]string); ok {
+				seatNumbers = seats
+			}
+		} else {
+			// Single ticket
+			if tid, ok := s.Data["controller_ticket_id"].(string); ok {
+				ticketIDs = []string{tid}
+			}
+			if phone, ok := s.Data["controller_passenger_phone"].(string); ok {
+				passengerPhones = []string{phone}
+			}
+			if seat, ok := s.Data["controller_seat_number"].(string); ok {
+				seatNumbers = []string{seat}
+			}
+			passengerNames = []string{passengerName}
+		}
+	}
+
+	if bookingID == "" || len(ticketIDs) == 0 {
+		return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
+	}
+
+	// Start transaction for atomic operations
+	tx, err := DB.Beginx()
+	if err != nil {
+		return fmt.Sprintf("❌ Erreur lors du début de la transaction : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 1. Update booking status to confirmed
+	_, err = tx.Exec(`UPDATE bookings SET status = 'confirmed' WHERE id = $1`, bookingID)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la confirmation de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 2. Create/validate cash payment record
+	var paymentID string
+	err = tx.Get(&paymentID, `SELECT id FROM payments WHERE reference = $1`, bookingRef+"_cash")
+	if err == sql.ErrNoRows {
+		// Create new cash payment record
+		_, err = tx.Exec(`
+			INSERT INTO payments (reference, amount, currency, payment_method, status, description)
+			VALUES ($1, $2, 'USD', 'CASH', 'SUCCESS', 'Paiement espèces au guichet')
+		`, bookingRef+"_cash", totalAmount)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la création du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	} else if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la vérification du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	} else {
+		// Payment exists, update to SUCCESS
+		_, err = tx.Exec(`UPDATE payments SET status = 'SUCCESS', updated_at = NOW() WHERE id = $1`, paymentID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la mise à jour du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	// 3. Update ALL tickets status to checked_in with guard condition
+	for _, ticketID := range ticketIDs {
+		_, err = tx.Exec(`
+			UPDATE tickets
+			SET status = 'checked_in', checked_in_at = NOW(), payment_validated = TRUE
+			WHERE id = $1
+			AND booking_id IN (SELECT id FROM bookings WHERE status = 'confirmed')`,
+			ticketID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors du check-in : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	// Commit transaction
+	if err = tx.Commit(); err != nil {
+		return fmt.Sprintf("❌ Erreur lors de la finalisation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 4. Send WhatsApp notification to ALL passengers
+	for i, phone := range passengerPhones {
+		if phone != "" {
+			name := passengerNames[i]
+			if name == "" {
+				name = "Passager"
+			}
+			seat := seatNumbers[i]
+			if seat == "" {
+				seat = "N/A"
+			}
+			sendCashValidationNotificationToPassenger(phone, bookingRef, name, origin, destination, seat, totalAmount)
+		}
+	}
+
+	// Build success message
+	var successMsg string
+	if isPayAll {
+		successMsg = fmt.Sprintf("✅ *Encaissement Cash + Check-in Groupe effectués avec succès !*\n\n📌 *Référence* : %s\n👥 *Nombre de billets* : %d\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant total encaissé* : %.2f USD\n📊 *Statut* : confirmed + checked_in (Tous embarqués)\n\nTapez *menu* pour revenir au menu principal.",
+			bookingRef, len(ticketIDs), origin, destination, totalAmount)
+	} else {
+		seat := ""
+		if len(seatNumbers) > 0 {
+			seat = seatNumbers[0]
+		}
+		successMsg = fmt.Sprintf("✅ *Encaissement Cash + Check-in effectués avec succès !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n💺 *Siège* : N° %s\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant encaissé* : %.2f USD\n📊 *Statut* : confirmed + checked_in (Embarqué)\n\nTapez *menu* pour revenir au menu principal.",
+			bookingRef, passengerName, seat, origin, destination, totalAmount)
+	}
+
+	// Reset to menu
+	s.Step = StepMenu
+	s.PreviousStep = ""
+
+	// Clean up session data
+	delete(s.Data, "controller_pay_all")
+	delete(s.Data, "controller_ticket_ids")
+	delete(s.Data, "controller_passenger_phones")
+	delete(s.Data, "controller_passenger_names")
+	delete(s.Data, "controller_seat_numbers")
+	delete(s.Data, "controller_selected_ticket_id")
+
+	return successMsg
+}
+
+// processCashPaymentOnlyUnified processes cash payment without check-in
+// Handles both single ticket (isPayAll=false) and group tickets (isPayAll=true)
+func processCashPaymentOnlyUnified(s *Session, isPayAll bool) string {
+	bookingID := ""
+	bookingRef := ""
+	passengerName := ""
+	origin := ""
+	destination := ""
+	totalAmount := 0.0
+	var ticketIDs []string
+	var passengerPhones []string
+	var passengerNames []string
+	var seatNumbers []string
+
+	if s.Data != nil {
+		if id, ok := s.Data["controller_booking_id"].(string); ok {
+			bookingID = id
+		}
+		if ref, ok := s.Data["controller_booking_ref"].(string); ok {
+			bookingRef = ref
+		}
+		if name, ok := s.Data["controller_passenger_name"].(string); ok {
+			passengerName = name
+		}
+		if org, ok := s.Data["controller_origin"].(string); ok {
+			origin = org
+		}
+		if dest, ok := s.Data["controller_destination"].(string); ok {
+			destination = dest
+		}
+		if amount, ok := s.Data["controller_total_amount"].(float64); ok {
+			totalAmount = amount
+		}
+
+		if isPayAll {
+			if ids, ok := s.Data["controller_ticket_ids"].([]string); ok {
+				ticketIDs = ids
+			}
+			if phones, ok := s.Data["controller_passenger_phones"].([]string); ok {
+				passengerPhones = phones
+			}
+			if names, ok := s.Data["controller_passenger_names"].([]string); ok {
+				passengerNames = names
+			}
+			if seats, ok := s.Data["controller_seat_numbers"].([]string); ok {
+				seatNumbers = seats
+			}
+		} else {
+			// Single ticket
+			if tid, ok := s.Data["controller_ticket_id"].(string); ok {
+				ticketIDs = []string{tid}
+			}
+			if phone, ok := s.Data["controller_passenger_phone"].(string); ok {
+				passengerPhones = []string{phone}
+			}
+			if seat, ok := s.Data["controller_seat_number"].(string); ok {
+				seatNumbers = []string{seat}
+			}
+			passengerNames = []string{passengerName}
+		}
+	}
+
+	if bookingID == "" {
+		return "❌ Erreur : aucune réservation sélectionnée. Tapez *menu* pour retourner au menu principal."
+	}
+
+	// Start transaction
+	tx, err := DB.Beginx()
+	if err != nil {
+		return fmt.Sprintf("❌ Erreur lors du début de la transaction : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 1. Update booking status to confirmed
+	_, err = tx.Exec(`UPDATE bookings SET status = 'confirmed' WHERE id = $1`, bookingID)
+	if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la confirmation de la réservation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// 2. Create/validate cash payment record
+	var paymentID string
+	err = tx.Get(&paymentID, `SELECT id FROM payments WHERE reference = $1`, bookingRef+"_cash")
+	if err == sql.ErrNoRows {
+		_, err = tx.Exec(`
+			INSERT INTO payments (reference, amount, currency, payment_method, status, description)
+			VALUES ($1, $2, 'USD', 'CASH', 'SUCCESS', 'Paiement espèces au guichet')
+		`, bookingRef+"_cash", totalAmount)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la création du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	} else if err != nil {
+		tx.Rollback()
+		return fmt.Sprintf("❌ Erreur lors de la vérification du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	} else {
+		_, err = tx.Exec(`UPDATE payments SET status = 'SUCCESS', updated_at = NOW() WHERE id = $1`, paymentID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la mise à jour du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	// 3. Update ticket payment_validated to TRUE (but NOT check-in)
+	for _, ticketID := range ticketIDs {
+		_, err = tx.Exec(`
+			UPDATE tickets
+			SET payment_validated = TRUE
+			WHERE id = $1
+			AND booking_id IN (SELECT id FROM bookings WHERE status = 'confirmed')`,
+			ticketID)
+		if err != nil {
+			tx.Rollback()
+			return fmt.Sprintf("❌ Erreur lors de la validation du paiement : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+		}
+	}
+
+	if err = tx.Commit(); err != nil {
+		return fmt.Sprintf("❌ Erreur lors de la finalisation : %v\n\nTapez *menu* pour retourner au menu principal.", err)
+	}
+
+	// Send WhatsApp notification to ALL passengers
+	for i, phone := range passengerPhones {
+		if phone != "" {
+			name := passengerNames[i]
+			if name == "" {
+				name = "Passager"
+			}
+			seat := seatNumbers[i]
+			if seat == "" {
+				seat = "N/A"
+			}
+			sendCashValidationNotificationToPassenger(phone, bookingRef, name, origin, destination, seat, totalAmount)
+		}
+	}
+
+	// Build success message
+	var successMsg string
+	if isPayAll {
+		successMsg = fmt.Sprintf("✅ *Paiement Groupe encaissé avec succès !*\n\n📌 *Référence* : %s\n👥 *Nombre de billets* : %d\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant total encaissé* : %.2f USD\n📊 *Statut* : confirmed (Tous payés)\n\nLes passagers pourront faire leur check-in ultérieurement.\n\nTapez *menu* pour revenir au menu principal.",
+			bookingRef, len(ticketIDs), origin, destination, totalAmount)
+	} else {
+		seat := ""
+		if len(seatNumbers) > 0 {
+			seat = seatNumbers[0]
+		}
+		successMsg = fmt.Sprintf("✅ *Paiement Cash encaissé avec succès !*\n\n📌 *Référence* : %s\n👤 *Passager* : %s\n💺 *Siège* : N° %s\n🚌 *Trajet* : %s ➔ %s\n💰 *Montant encaissé* : %.2f USD\n📊 *Statut* : confirmed (Payé)\n\nLe passager pourra faire son check-in ultérieurement.\n\nTapez *menu* pour revenir au menu principal.",
+			bookingRef, passengerName, seat, origin, destination, totalAmount)
+	}
+
+	// Return to controller actions menu
+	s.PreviousStep = s.Step
+	s.Step = StepControllerActions
+
+	return successMsg
+}
+
 // processControllerBookingResult processes a booking found by the controller
 // Implements smart ticket state detection: pending (cash), confirmed, checked_in
 func processControllerBookingResult(s *Session, bookingResult BookingDetailsResult) string {
@@ -3410,18 +3779,19 @@ func processControllerBookingResult(s *Session, bookingResult BookingDetailsResu
 	// CASE 1: Pending (cash/unpaid) - offer cash payment + check-in workflow
 	if bookingResult.Status == "pending" || bookingResult.Status == "" {
 		s.PreviousStep = s.Step
-		s.Step = StepControllerCashCheckinConfirm
+		s.Step = StepControllerActionChoice
+
+		// Mark as single ticket (not pay all)
+		s.Data["controller_pay_all"] = false
+		s.Data["controller_selected_ticket_id"] = bookingResult.TicketID
 
 		var b strings.Builder
-		b.WriteString(fmt.Sprintf("💵 *Réservation en attente de paiement (Cash)*\n\n"))
-		b.WriteString(fmt.Sprintf("📌 *Référence* : %s\n", bookingResult.BookingReference))
-		b.WriteString(fmt.Sprintf("👤 *Passager* : %s\n", passengerName))
+		b.WriteString(fmt.Sprintf("💳 *Action requise pour %s*\n\n", passengerName))
+		b.WriteString(fmt.Sprintf("📌 *Réservation* : %s\n", bookingResult.BookingReference))
+		b.WriteString(fmt.Sprintf("💺 *Siège* : N° %s\n", seatNumber))
 		b.WriteString(fmt.Sprintf("🚌 *Trajet* : %s ➔ %s\n", bookingResult.Origin, bookingResult.Destination))
 		b.WriteString(fmt.Sprintf("📅 *Départ* : %s à %s\n", formatDate(bookingResult.DepartureDate), bookingResult.DepartureTime))
-		if seatNumber != "" {
-			b.WriteString(fmt.Sprintf("💺 *Siège* : N° %s\n", seatNumber))
-		}
-		b.WriteString(fmt.Sprintf("\n💰 *Montant à encaisser* : %.2f USD\n\n", bookingResult.TotalAmount))
+		b.WriteString(fmt.Sprintf("\n💰 *Montant total* : %.2f USD\n\n", bookingResult.TotalAmount))
 		b.WriteString("Sélectionnez une action :\n")
 		b.WriteString("1️⃣ Encaisser le Cash ET valider le Check-in (Recommandé)\n")
 		b.WriteString("2️⃣ Encaisser le Cash seulement\n")
