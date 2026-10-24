@@ -229,10 +229,10 @@ func main() {
 			})
 		}
 
-		// Analytics routes (require organization auth - owner or platform_admin)
+		// Analytics routes (require organization auth - owner, platform_admin, or super_admin)
 		analytics := api.Group("/analytics")
 		analytics.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-		analytics.Use(middleware.RoleMiddleware("owner"))
+		analytics.Use(middleware.RoleMiddleware("owner", "platform_admin", "super_admin"))
 		{
 			analytics.GET("/dashboard", analyticsHandler.GetDashboardStats)
 			analytics.GET("/report", analyticsHandler.GetRevenueReport)

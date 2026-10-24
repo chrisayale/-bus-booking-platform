@@ -56,7 +56,7 @@ func RoleMiddleware(roles ...string) gin.HandlerFunc {
 	}
 }
 
-// AdminMiddleware checks if the user has platform_admin role
+// AdminMiddleware checks if the user has platform_admin or super_admin role
 func AdminMiddleware() gin.HandlerFunc {
-	return RoleMiddleware("platform_admin")
+	return RoleMiddleware("platform_admin", "super_admin")
 }
