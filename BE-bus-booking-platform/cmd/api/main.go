@@ -127,6 +127,24 @@ func main() {
 		c.Data(http.StatusOK, "image/png", qr)
 	})
 
+	// WhatsApp status endpoint for diagnostics
+	r.GET("/api/whatsapp/status", func(c *gin.Context) {
+		if whatsapp.Client == nil {
+			c.JSON(http.StatusOK, gin.H{
+				"connected":  false,
+				"logged_in":  false,
+				"jid":        "",
+				"error":      "WhatsApp client not initialized",
+			})
+			return
+		}
+		c.JSON(http.StatusOK, gin.H{
+			"connected":  whatsapp.Client.IsConnected(),
+			"logged_in":  whatsapp.Client.IsLoggedIn(),
+			"jid":        whatsapp.Client.Store.ID.String(),
+		})
+	})
+
 	// Payment webhooks
 	api := r.Group("/api")
 	{

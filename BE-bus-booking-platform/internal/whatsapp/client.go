@@ -11,6 +11,7 @@ import (
 	qrcode "github.com/skip2/go-qrcode"
 	"go.mau.fi/whatsmeow"
 	"go.mau.fi/whatsmeow/store/sqlstore"
+	"go.mau.fi/whatsmeow/types/events"
 	waLog "go.mau.fi/whatsmeow/util/log"
 )
 
@@ -61,7 +62,7 @@ func renderQRCodeTerminal(code string) string {
 
 func Connect(databaseURL string) error {
 	log.Println("[WHATSAPP-INIT] Démarrage du client WhatsMeow...")
-	
+
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	container, err := sqlstore.New(context.Background(), "postgres", databaseURL, dbLog)
@@ -86,6 +87,9 @@ func Connect(databaseURL string) error {
 	// This ensures we receive all events including historical messages on reconnect
 	RegisterHandlers()
 	log.Printf("[WHATSAPP] Event handlers registered")
+
+	// Register connection state event handlers for diagnostics
+	registerConnectionStateHandlers()
 
 	if Client.Store.ID == nil {
 		// Pas encore connecté — il faut scanner un QR code
@@ -130,4 +134,19 @@ func Connect(databaseURL string) error {
 	}
 
 	return nil
+}
+
+// registerConnectionStateHandlers registers handlers for connection state events
+// to log Disconnected, ConnectFailure, and LoggedOut events for diagnostics
+func registerConnectionStateHandlers() {
+	Client.AddEventHandler(func(evt interface{}) {
+		switch v := evt.(type) {
+		case *events.Disconnected:
+			log.Printf("[WHATSAPP-CONNECTION] ❌ DISCONNECTED: Websocket closed by server")
+		case *events.ConnectFailure:
+			log.Printf("[WHATSAPP-CONNECTION] ❌ CONNECT FAILURE: Reason=%v, Message=%s", v.Reason, v.Message)
+		case *events.LoggedOut:
+			log.Printf("[WHATSAPP-CONNECTION] 🚪 LOGGED OUT: OnConnect=%v, Reason=%v", v.OnConnect, v.Reason)
+		}
+	})
 }
