@@ -488,10 +488,26 @@ func (h *B2BHandler) ListPendingOwners(c *gin.Context) {
 
 func (h *B2BHandler) ApproveOwner(c *gin.Context) {
 	id := c.Param("id")
-	_, err := h.DB.Exec(`UPDATE users SET approval_status = 'approved', updated_at = NOW() WHERE id = $1 AND role = 'owner'`, id)
+	// Get owner's organization_id first
+	var orgID string
+	err := h.DB.Get(&orgID, `SELECT organization_id FROM users WHERE id = $1 AND role = 'owner'`, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to find owner organization"})
+		return
+	}
+	// Update user: approve, verify, activate
+	_, err = h.DB.Exec(`UPDATE users SET approval_status = 'approved', is_verified = true, is_active = true, updated_at = NOW() WHERE id = $1 AND role = 'owner'`, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to approve owner"})
 		return
+	}
+	// Also activate the organization
+	if orgID != "" {
+		_, err = h.DB.Exec(`UPDATE organizations SET is_active = true, updated_at = NOW() WHERE id = $1`, orgID)
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to activate organization"})
+			return
+		}
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "owner approved"})
 }
@@ -689,9 +705,16 @@ func (h *B2BHandler) SetAgencyActive(c *gin.Context) {
 		c.JSON(http.StatusBadRequest, gin.H{"error": err.Error()})
 		return
 	}
+	// Update organization is_active
 	_, err := h.DB.Exec(`UPDATE organizations SET is_active = $1, updated_at = NOW() WHERE id = $2`, req.IsActive, id)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update agency status"})
+		return
+	}
+	// Also update the owner user's is_active status
+	_, err = h.DB.Exec(`UPDATE users SET is_active = $1, updated_at = NOW() WHERE organization_id = $2 AND role = 'owner'`, req.IsActive, id)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update owner user status"})
 		return
 	}
 	c.JSON(http.StatusOK, gin.H{"message": "agency status updated"})
