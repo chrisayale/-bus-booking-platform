@@ -3,6 +3,7 @@ package handlers
 import (
 	"database/sql"
 	"fmt"
+	"log"
 	"net/http"
 	"strings"
 
@@ -148,12 +149,15 @@ func (h *AdminHandler) GetUsers(c *gin.Context) {
 	// For each user, fetch their organizations via the join table
 	for i := range users {
 		var orgs []models.Organization
-		h.DB.Select(&orgs, `
+		if err := h.DB.Select(&orgs, `
 			SELECT o.id, o.name, o.email, o.phone, o.logo_url, o.is_active, o.created_at, o.updated_at
 			FROM organizations o
 			JOIN user_organizations uo ON o.id = uo.organization_id
 			WHERE uo.user_id = $1
-		`, users[i].ID)
+		`, users[i].ID); err != nil {
+			// Log error but continue - don't fail the entire request for one user's orgs
+			log.Printf("Warning: failed to fetch organizations for user %s: %v", users[i].ID, err)
+		}
 		users[i].Organizations = orgs
 	}
 
