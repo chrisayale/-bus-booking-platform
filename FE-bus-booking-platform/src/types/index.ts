@@ -3,7 +3,7 @@ export interface User {
   email: string
   full_name: string
   phone?: string
-  role: "owner" | "passenger" | "platform_admin" | "agent" | "controller"
+  role: "owner" | "passenger" | "platform_admin" | "agent" | "controller" | "super_admin"
   organization_id?: string
   organizations?: Organization[]
   is_verified: boolean
