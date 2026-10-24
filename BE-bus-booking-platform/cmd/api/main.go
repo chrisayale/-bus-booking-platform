@@ -45,6 +45,11 @@ func main() {
 		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
 	}
 
+	// Clean up test agencies and accounts (except super admin) for fresh registrations
+	if err := database.CleanupTestData(db); err != nil {
+		log.Printf("Warning: failed to cleanup test data: %v", err)
+	}
+
 	// Ensure super admin account exists on every startup (idempotent UPSERT)
 	if err := database.EnsureSuperAdmin(db); err != nil {
 		log.Printf("Warning: failed to ensure super admin account: %v", err)

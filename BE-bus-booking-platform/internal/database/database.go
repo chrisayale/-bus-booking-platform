@@ -85,6 +85,131 @@ func RunSeed(db *sqlx.DB) error {
 	return nil
 }
 
+// CleanupTestData removes test agencies and associated accounts to allow fresh agency registrations.
+// Keeps only the Super Admin account (superadmin@ayaletrans.com).
+func CleanupTestData(db *sqlx.DB) error {
+	log.Println("Cleaning up test agencies and associated accounts...")
+
+	// First, find organizations to delete (exclude any that might be needed, but we clean all test orgs)
+	// We'll delete all organizations except we keep none - super admin has no org
+	// Delete associated data in correct order due to foreign keys
+
+	// 1. Delete tickets for journeys of these orgs
+	// 2. Delete bookings for users of these orgs
+	// 3. Delete journeys, buses, routes, route_stops for these orgs
+	// 4. Delete user_organizations entries
+	// 5. Delete users with role 'owner', 'agent', 'controller' (keep super_admin, platform_admin, passenger)
+	// 6. Delete organizations
+
+	// Get organization IDs to delete (all of them for clean slate)
+	var orgIDs []string
+	err := db.Select(&orgIDs, `SELECT id FROM organizations`)
+	if err != nil {
+		return fmt.Errorf("failed to fetch organizations: %w", err)
+	}
+
+	if len(orgIDs) > 0 {
+		// Build placeholders for IN clause
+		placeholders := make([]string, len(orgIDs))
+		args := make([]interface{}, len(orgIDs))
+		for i, id := range orgIDs {
+			placeholders[i] = fmt.Sprintf("$%d", i+1)
+			args[i] = id
+		}
+		inClause := strings.Join(placeholders, ", ")
+
+		// Delete in transaction for consistency
+		tx, err := db.Beginx()
+		if err != nil {
+			return fmt.Errorf("failed to start transaction: %w", err)
+		}
+		defer tx.Rollback()
+
+		// Delete tickets for journeys of these orgs
+		_, err = tx.Exec(fmt.Sprintf(`
+			DELETE FROM tickets WHERE journey_id IN (
+				SELECT id FROM journeys WHERE organization_id IN (%s)
+			)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete tickets: %w", err)
+		}
+
+		// Delete bookings for users of these orgs (owners)
+		_, err = tx.Exec(fmt.Sprintf(`
+			DELETE FROM bookings WHERE user_id IN (
+				SELECT id FROM users WHERE organization_id IN (%s)
+			)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete bookings: %w", err)
+		}
+
+		// Delete journeys
+		_, err = tx.Exec(fmt.Sprintf(`DELETE FROM journeys WHERE organization_id IN (%s)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete journeys: %w", err)
+		}
+
+		// Delete buses
+		_, err = tx.Exec(fmt.Sprintf(`DELETE FROM buses WHERE organization_id IN (%s)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete buses: %w", err)
+		}
+
+		// Delete route_stops for routes of these orgs
+		_, err = tx.Exec(fmt.Sprintf(`
+			DELETE FROM route_stops WHERE route_id IN (
+				SELECT id FROM routes WHERE organization_id IN (%s)
+			)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete route_stops: %w", err)
+		}
+
+		// Delete routes
+		_, err = tx.Exec(fmt.Sprintf(`DELETE FROM routes WHERE organization_id IN (%s)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete routes: %w", err)
+		}
+
+		// Delete user_organizations entries for these orgs
+		_, err = tx.Exec(fmt.Sprintf(`DELETE FROM user_organizations WHERE organization_id IN (%s)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete user_organizations: %w", err)
+		}
+
+		// Delete users with role in ('owner', 'agent', 'controller') for these orgs
+		_, err = tx.Exec(fmt.Sprintf(`
+			DELETE FROM users WHERE organization_id IN (%s) AND role IN ('owner', 'agent', 'controller')
+		`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete users: %w", err)
+		}
+
+		// Delete organizations
+		_, err = tx.Exec(fmt.Sprintf(`DELETE FROM organizations WHERE id IN (%s)`, inClause), args...)
+		if err != nil {
+			return fmt.Errorf("failed to delete organizations: %w", err)
+		}
+
+		if err = tx.Commit(); err != nil {
+			return fmt.Errorf("failed to commit cleanup transaction: %w", err)
+		}
+
+		log.Printf("Cleaned up %d test organization(s) and associated data", len(orgIDs))
+	} else {
+		log.Println("No test organizations found to clean up")
+	}
+
+	// Also clean up any pending_agencies
+	_, err = db.Exec(`DELETE FROM pending_agencies`)
+	if err != nil {
+		log.Printf("Warning: failed to clean pending_agencies: %v", err)
+	} else {
+		log.Println("Cleaned up pending_agencies table")
+	}
+
+	return nil
+}
+
 // EnsureSuperAdmin ensures the super admin account exists on every startup.
 // Uses UPSERT (ON CONFLICT) to be idempotent — safe to run on every boot.
 // Uses "super_admin" role which has full admin privileges in the application.
