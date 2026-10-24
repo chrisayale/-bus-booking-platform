@@ -67,13 +67,14 @@ VALUES (
 ON CONFLICT (email) DO NOTHING;
 
 -- Super Admin — password: Chrisayale@2020
-INSERT INTO users (email, password_hash, full_name, phone, role, is_verified)
+INSERT INTO users (email, password_hash, full_name, phone, role, is_verified, is_active)
 VALUES (
   'superadmin@ayaletrans.com',
   '$2a$10$2xGTAcz5UTTDVbKjL1UDhOahYCvle7Y3.ghA5lGGTRUvAgeJd86Rm',
   'Super Admin',
   '+212 6XX ZZZ ZZZ',
   'super_admin',
+  true,
   true
 )
 ON CONFLICT (email) DO UPDATE SET
@@ -82,6 +83,7 @@ ON CONFLICT (email) DO UPDATE SET
   phone = EXCLUDED.phone,
   role = EXCLUDED.role,
   is_verified = EXCLUDED.is_verified,
+  is_active = EXCLUDED.is_active,
   updated_at = NOW();
 
 -- ===========================

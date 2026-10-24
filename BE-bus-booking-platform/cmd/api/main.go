@@ -213,7 +213,7 @@ func main() {
 
 			// User management (Super Admin only)
 			users := admin.Group("/users")
-			users.Use(middleware.RoleMiddleware("platform_admin"))
+			users.Use(middleware.RoleMiddleware("platform_admin", "super_admin"))
 			{
 				users.GET("", adminHandler.GetUsers)
 				users.POST("", adminHandler.CreateUser)
@@ -279,10 +279,10 @@ func main() {
 			b2b.POST("/scan-ticket", b2bHandler.ScanTicket)
 		}
 
-		// Platform admin functions (platform_admin role required)
+		// Platform admin functions (platform_admin and super_admin roles required)
 		platformAdmin := api.Group("/platform-admin")
 		platformAdmin.Use(middleware.AuthMiddleware(cfg.JWTSecret))
-		platformAdmin.Use(middleware.RoleMiddleware("platform_admin"))
+		platformAdmin.Use(middleware.RoleMiddleware("platform_admin", "super_admin"))
 		{
 			platformAdmin.GET("/pending-owners", b2bHandler.ListPendingOwners)
 			platformAdmin.PUT("/pending-owners/:id/approve", b2bHandler.ApproveOwner)

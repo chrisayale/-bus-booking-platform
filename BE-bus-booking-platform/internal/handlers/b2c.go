@@ -127,16 +127,19 @@ func (h *B2CHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	if user.Role == "owner" {
-		// Check if user account is active and verified
+	// Check if user account is active and verified for all roles that require it
+	if user.Role == "owner" || user.Role == "platform_admin" || user.Role == "super_admin" {
 		if !user.IsActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is inactive. Please contact administrator."})
+			c.JSON(http.StatusForbidden, gin.H{"error": "your account is inactive. Please contact administrator."})
 			return
 		}
 		if !user.IsVerified {
-			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending email verification"})
+			c.JSON(http.StatusForbidden, gin.H{"error": "your account is pending email verification"})
 			return
 		}
+	}
+	// Additional checks for owner role
+	if user.Role == "owner" {
 		if user.ApprovalStatus == "pending" {
 			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending approval"})
 			return
