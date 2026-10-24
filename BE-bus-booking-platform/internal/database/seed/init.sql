@@ -66,6 +66,24 @@ VALUES (
 )
 ON CONFLICT (email) DO NOTHING;
 
+-- Super Admin — password: Chrisayale@2020
+INSERT INTO users (email, password_hash, full_name, phone, role, is_verified)
+VALUES (
+  'superadmin@ayaletrans.com',
+  '$2a$10$2xGTAcz5UTTDVbKjL1UDhOahYCvle7Y3.ghA5lGGTRUvAgeJd86Rm',
+  'Super Admin',
+  '+212 6XX ZZZ ZZZ',
+  'super_admin',
+  true
+)
+ON CONFLICT (email) DO UPDATE SET
+  password_hash = EXCLUDED.password_hash,
+  full_name = EXCLUDED.full_name,
+  phone = EXCLUDED.phone,
+  role = EXCLUDED.role,
+  is_verified = EXCLUDED.is_verified,
+  updated_at = NOW();
+
 -- ===========================
 -- 5. Journeys — 7 days starting tomorrow
 -- ===========================
