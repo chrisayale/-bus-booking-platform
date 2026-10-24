@@ -32,7 +32,7 @@ function ProtectedRoute({ children, ownerOnly = false, platformAdminOnly = false
   const { isAuthenticated, isOwner, isPlatformAdmin, isLoading } = useAuth()
   if (isLoading) return <div className="flex items-center justify-center min-h-screen"><div className="w-8 h-8 border-4 border-blue-600 border-t-transparent rounded-full animate-spin" /></div>
   if (!isAuthenticated) return <Navigate to="/auth" replace />
-  if (ownerOnly && !isOwner) return <Navigate to="/search" replace />
+  if (ownerOnly && !isOwner && !isPlatformAdmin) return <Navigate to="/search" replace />
   if (platformAdminOnly && !isPlatformAdmin) return <Navigate to="/search" replace />
   return <>{children}</>
 }

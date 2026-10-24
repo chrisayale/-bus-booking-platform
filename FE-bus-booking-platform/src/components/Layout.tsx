@@ -9,7 +9,7 @@ import {
 } from "lucide-react"
 
 export default function Layout() {
-    const { isAuthenticated, isOwner, isPlatformAdmin, user } = useAuth()
+    const { isAuthenticated, isOwner, isPlatformAdmin, isSuperAdmin, user } = useAuth()
   const { t } = useTranslate()
   const dispatch = useDispatch()
   const navigate = useNavigate()
@@ -48,7 +48,7 @@ export default function Layout() {
                       <NavLink to="/platform/pending-owners" icon={Shield} label="Demandes agences" active={isActive("/platform/pending-owners")} />
                       <NavLink to="/platform/agents" icon={Users} label="Agents" active={isActive("/platform/agents")} />
                     </div>
-                  ) : isOwner ? (
+                  ) : isOwner || isSuperAdmin ? (
                     <div className="flex items-center gap-1">
                       <NavLink to="/owner/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} active={isActive("/owner/dashboard")} />
                       <NavLink to="/owner/buses" icon={Bus} label={t("nav.fleet")} active={isActive("/owner/buses")} />
@@ -123,7 +123,7 @@ export default function Layout() {
       {isAuthenticated && (
         <div className="md:hidden fixed bottom-0 left-0 right-0 z-50 bg-white/90 backdrop-blur-xl border-t border-gray-200 safe-area-bottom">
                     <div className="flex items-center gap-1 overflow-x-auto py-2 px-2">
-                    {isOwner ? (
+                    {isOwner || isSuperAdmin ? (
               <>
                 <MobileNavLink to="/owner/dashboard" icon={LayoutDashboard} label={t("nav.dashboard")} active={isActive("/owner/dashboard")} />
                 <MobileNavLink to="/owner/buses" icon={Bus} label={t("nav.fleet")} active={isActive("/owner/buses")} />

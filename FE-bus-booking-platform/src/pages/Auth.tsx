@@ -27,7 +27,14 @@ export default function Auth() {
     if (mode === "login") {
       const result = await dispatch(login({ email, password }))
       if (login.fulfilled.match(result)) {
-        navigate(result.payload.role === "owner" ? "/owner/dashboard" : "/search")
+        const role = result.payload.role
+        if (role === "owner" || role === "platform_admin" || role === "super_admin") {
+          navigate("/owner/dashboard")
+        } else if (role === "agent" || role === "controller") {
+          navigate("/owner/counter")
+        } else {
+          navigate("/search")
+        }
       }
        } else {
       const result = await dispatch(register({

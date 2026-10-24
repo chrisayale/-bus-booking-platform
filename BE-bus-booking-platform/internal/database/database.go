@@ -87,12 +87,13 @@ func RunSeed(db *sqlx.DB) error {
 
 // EnsureSuperAdmin ensures the super admin account exists on every startup.
 // Uses UPSERT (ON CONFLICT) to be idempotent — safe to run on every boot.
+// Uses "platform_admin" role which has full admin privileges in the application.
 func EnsureSuperAdmin(db *sqlx.DB) error {
 	const superAdminEmail = "superadmin@ayaletrans.com"
 	const superAdminPasswordHash = "$2a$10$2xGTAcz5UTTDVbKjL1UDhOahYCvle7Y3.ghA5lGGTRUvAgeJd86Rm" // bcrypt cost 10 for "Chrisayale@2020"
 	const superAdminFullName = "Super Admin"
 	const superAdminPhone = "+212 6XX ZZZ ZZZ"
-	const superAdminRole = "super_admin"
+	const superAdminRole = "platform_admin"
 
 	query := `
 		INSERT INTO users (email, password_hash, full_name, phone, role, is_verified)

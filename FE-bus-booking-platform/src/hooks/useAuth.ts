@@ -8,8 +8,9 @@ export function useAuth() {
     user,
     isAuthenticated,
     isLoading,
-        isOwner: isAuthenticated && user?.role === "owner",
+    isOwner: isAuthenticated && user?.role === "owner",
     isPassenger: isAuthenticated && user?.role === "passenger",
-    isPlatformAdmin: isAuthenticated && user?.role === "platform_admin",
+    isPlatformAdmin: isAuthenticated && (user?.role === "platform_admin" || user?.role === "super_admin"),
+    isSuperAdmin: isAuthenticated && user?.role === "super_admin",
   }
 }
