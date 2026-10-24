@@ -2,6 +2,7 @@ package whatsapp
 
 import (
 	"context"
+	"log"
 	"sync"
 
 	_ "github.com/lib/pq"
@@ -47,6 +48,11 @@ func Connect(databaseURL string) error {
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	Client = whatsmeow.NewClient(deviceStore, clientLog)
 
+	// CRITICAL: Register event handlers BEFORE connecting
+	// This ensures we receive all events including historical messages on reconnect
+	RegisterHandlers()
+	log.Printf("[WHATSAPP] Event handlers registered")
+
 	if Client.Store.ID == nil {
 		// Pas encore connecté — il faut scanner un QR code
 		qrChan, _ := Client.GetQRChannel(context.Background())
@@ -54,7 +60,6 @@ func Connect(databaseURL string) error {
 		if err != nil {
 			return err
 		}
-		RegisterHandlers()
 		for evt := range qrChan {
 			if evt.Event == "code" {
 				println("Nouveau QR code WhatsApp généré — ouvre /api/whatsapp/qr")
@@ -69,7 +74,7 @@ func Connect(databaseURL string) error {
 		if err != nil {
 			return err
 		}
-		RegisterHandlers()
+		log.Printf("[WHATSAPP] Reconnected to WhatsApp successfully")
 	}
 
 	return nil

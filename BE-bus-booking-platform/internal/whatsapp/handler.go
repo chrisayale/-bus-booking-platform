@@ -595,21 +595,97 @@ func formatMyTickets(tickets []CreatedTicket) string {
 func RegisterHandlers() {
 	log.Printf("[INFO] Registering WhatsApp event handlers")
 	Client.AddEventHandler(func(evt interface{}) {
+		// DEBUG: Log ALL events received
+		log.Printf("[WHATSAPP-EVENT] Received event type: %T", evt)
+
 		switch v := evt.(type) {
 		case *events.Message:
-			text := extractText(v)
-			if text == "" {
-				return
+			// DEBUG: Log ALL incoming message events with full details
+			log.Printf("[WHATSAPP-DEBUG] Received message event from %s (IsFromMe: %v, MessageType: %T, Timestamp: %v, IsGroup: %v)",
+				v.Info.Sender.User, v.Info.IsFromMe, v.Message, v.Info.Timestamp, v.Info.IsGroup)
+
+			// Log the raw message structure for debugging
+			if v.Message != nil {
+				msgType := "unknown"
+				if v.Message.GetConversation() != "" {
+					msgType = "conversation"
+				} else if v.Message.GetExtendedTextMessage() != nil {
+					msgType = "extendedText"
+				} else if v.Message.GetImageMessage() != nil {
+					msgType = "image"
+				} else if v.Message.GetDocumentMessage() != nil {
+					msgType = "document"
+				} else if v.Message.GetVideoMessage() != nil {
+					msgType = "video"
+				} else if v.Message.GetAudioMessage() != nil {
+					msgType = "audio"
+				} else if v.Message.GetStickerMessage() != nil {
+					msgType = "sticker"
+				} else if v.Message.GetLocationMessage() != nil {
+					msgType = "location"
+				} else if v.Message.GetContactMessage() != nil {
+					msgType = "contact"
+				} else if v.Message.GetButtonsResponseMessage() != nil {
+					msgType = "buttonsResponse"
+				} else if v.Message.GetListResponseMessage() != nil {
+					msgType = "listResponse"
+				} else if v.Message.GetTemplateMessage() != nil {
+					msgType = "template"
+				} else if v.Message.GetReactionMessage() != nil {
+					msgType = "reaction"
+				} else if v.Message.GetPollCreationMessage() != nil {
+					msgType = "pollCreation"
+				} else if v.Message.GetPollUpdateMessage() != nil {
+					msgType = "pollUpdate"
+				}
+				log.Printf("[WHATSAPP-DEBUG] Message type: %s, ID: %s, Chat: %s", msgType, v.Info.ID, v.Info.Chat)
+
+				// Log text content if available
+				text := extractText(v)
+				if text != "" {
+					log.Printf("[WHATSAPP-DEBUG] Extracted text: %q", text)
+				}
+			} else {
+				log.Printf("[WHATSAPP-DEBUG] Message is nil!")
 			}
-			log.Printf("Received message from %s: %q", v.Info.Sender.User, text)
+
+			// Don't return early - let handleIncomingMessage process all message types
 			handleIncomingMessage(v)
+		case *events.Receipt:
+			log.Printf("[WHATSAPP-DEBUG] Receipt event: Type=%s, MessageIDs=%v, Chat=%s", v.Type, v.MessageIDs, v.Chat)
+		case *events.Presence:
+			log.Printf("[WHATSAPP-DEBUG] Presence event: From=%s, Unavailable=%v", v.From, v.Unavailable)
+		case *events.HistorySync:
+			log.Printf("[WHATSAPP-DEBUG] HistorySync event received")
+		case *events.AppState:
+			log.Printf("[WHATSAPP-DEBUG] AppState event received")
+		case *events.OfflineSyncCompleted:
+			log.Printf("[WHATSAPP-DEBUG] OfflineSyncCompleted event")
+		case *events.OfflineSyncPreview:
+			log.Printf("[WHATSAPP-DEBUG] OfflineSyncPreview event")
+		default:
+			log.Printf("[WHATSAPP-DEBUG] Unhandled event type: %T", evt)
+		}
+	})
+
+	// Also add a handler for connection state changes
+	Client.AddEventHandler(func(evt interface{}) {
+		if connEvt, ok := evt.(interface{ String() string }); ok {
+			log.Printf("[WHATSAPP-CONNECTION] State change: %s", connEvt.String())
 		}
 	})
 }
 
 // TODO: Test edit
 func handleIncomingMessage(evt *events.Message) {
+	// Ensure client is initialized
+	if Client == nil {
+		log.Printf("[ERROR] WhatsApp client is nil, cannot process message")
+		return
+	}
+
 	if evt.Info.IsFromMe {
+		log.Printf("[WHATSAPP-DEBUG] Ignoring message from self")
 		return
 	}
 
@@ -653,6 +729,7 @@ Tapez directement les **6 à 10 caractères de la référence** du billet (ex: B
 	// Handle regular text messages
 	text := strings.TrimSpace(extractText(evt))
 	if text == "" {
+		log.Printf("[WHATSAPP-DEBUG] No extractable text from message for %s", phone)
 		return
 	}
 
@@ -664,7 +741,25 @@ Tapez directement les **6 à 10 caractères de la référence** du billet (ex: B
 }
 
 func process(phone string, s *Session, text string, sender types.JID) string {
+	// Safety check: ensure session is not nil
+	if s == nil {
+		log.Printf("[ERROR] Session is nil for phone %s, creating new session", phone)
+		s = &Session{Step: StepMenu, UserPhone: phone, Data: make(map[string]interface{})}
+	}
+
+	// Ensure Data map is initialized
+	if s.Data == nil {
+		s.Data = make(map[string]interface{})
+	}
+
 	log.Printf("Processing message for phone %s, current step %s, text: %q", phone, s.Step, text)
+
+	// Ensure Client is available
+	if Client == nil {
+		log.Printf("[ERROR] WhatsApp client is nil in process()")
+		return "❌ Service temporairement indisponible. Veuillez réessayer dans quelques instants."
+	}
+
 	// Update UserPhone to the real phone number from the sender JID
 	realPhone := GetRealPhoneNumber(Client, sender)
 	if realPhone != "" {
@@ -3804,12 +3899,63 @@ func processControllerBookingResult(s *Session, bookingResult BookingDetailsResu
 // Helper functions - must be at package level in Go
 func extractText(evt *events.Message) string {
 	msg := evt.Message
+	if msg == nil {
+		return ""
+	}
+
+	// Regular conversation text
 	if msg.GetConversation() != "" {
 		return strings.TrimSpace(msg.GetConversation())
 	}
+
+	// Extended text (replies, mentions, etc.)
 	if msg.GetExtendedTextMessage() != nil {
 		return strings.TrimSpace(msg.GetExtendedTextMessage().GetText())
 	}
+
+	// Button response messages
+	if msg.GetButtonsResponseMessage() != nil {
+		btnResp := msg.GetButtonsResponseMessage()
+		if btnResp.GetSelectedButtonID() != "" {
+			log.Printf("[WHATSAPP-DEBUG] Button response: selectedButtonID=%q, selectedDisplayText=%q",
+				btnResp.GetSelectedButtonID(), btnResp.GetSelectedDisplayText())
+			// Return the button ID as text for processing
+			return strings.TrimSpace(btnResp.GetSelectedButtonID())
+		}
+		if btnResp.GetSelectedDisplayText() != "" {
+			return strings.TrimSpace(btnResp.GetSelectedDisplayText())
+		}
+	}
+
+	// List response messages
+	if msg.GetListResponseMessage() != nil {
+		listResp := msg.GetListResponseMessage()
+		if listResp.GetSingleSelectReply() != nil && listResp.GetSingleSelectReply().GetSelectedRowID() != "" {
+			log.Printf("[WHATSAPP-DEBUG] List response: selectedRowID=%q", listResp.GetSingleSelectReply().GetSelectedRowID())
+			return strings.TrimSpace(listResp.GetSingleSelectReply().GetSelectedRowID())
+		}
+	}
+
+	// Template message responses (e.g., button clicks from template messages)
+	if msg.GetTemplateMessage() != nil {
+		// TemplateMessage may have different structure depending on whatsmeow version
+		// Just log that we received a template message
+		log.Printf("[WHATSAPP-DEBUG] Template message received")
+	}
+
+	// Reaction messages - treat as text for logging
+	if msg.GetReactionMessage() != nil {
+		reaction := msg.GetReactionMessage()
+		return fmt.Sprintf("[REACTION] %s", reaction.GetText())
+	}
+
+	// Poll responses
+	if msg.GetPollUpdateMessage() != nil {
+		// Poll update message structure may vary
+		log.Printf("[WHATSAPP-DEBUG] Poll update message received")
+	}
+
+	log.Printf("[WHATSAPP-DEBUG] No extractable text from message type: %T", msg)
 	return ""
 }
 
