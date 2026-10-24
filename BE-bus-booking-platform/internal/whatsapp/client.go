@@ -91,48 +91,100 @@ func Connect(databaseURL string) error {
 	// Register connection state event handlers for diagnostics
 	registerConnectionStateHandlers()
 
+	// Check if we have a valid session, otherwise force new QR code
 	if Client.Store.ID == nil {
-		// Pas encore connecté — il faut scanner un QR code
+		// No device paired - need QR code
 		log.Println("[WHATSAPP-INIT] ⚠️ No paired device found (Store.ID is nil)")
-		log.Println("[WHATSAPP-INIT] Waiting for QR code scan...")
-		
-		qrChan, _ := Client.GetQRChannel(context.Background())
-		err = Client.Connect()
-		if err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
-			return err
-		}
-		
-		log.Println("[WHATSAPP-INIT] ✓ Client connection initiated, waiting for QR channel...")
-		
-		for evt := range qrChan {
-			if evt.Event == "code" {
-				log.Printf("[WHATSAPP-INIT] 📱 Nouveau QR code WhatsApp généré!")
-				log.Printf("[WHATSAPP-INIT] 📱 Ouvrez /api/whatsapp/qr pour voir le QR code en image")
-				
-				// Display QR code in terminal as ASCII/ANSI
-				qrDisplay := renderQRCodeTerminal(evt.Code)
-				log.Printf("%s", qrDisplay)
-				
-				setCurrentQR(evt.Code)
-				log.Printf("[WHATSAPP-INIT] ✓ QR code stored and ready for scanning")
-			} else if evt.Event == "success" {
-				log.Printf("[WHATSAPP-INIT] ✅ WhatsApp connected successfully! JID: %s", Client.Store.ID.User)
-			} else {
-				log.Printf("[WHATSAPP-INIT] Statut de connexion: %s", evt.Event)
-			}
-		}
-	} else {
-		// Déjà connecté précédemment
-		log.Printf("[WHATSAPP-INIT] 🔄 Existing session found for JID: %s", Client.Store.ID.User)
-		err = Client.Connect()
-		if err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ Failed to reconnect: %v", err)
-			return err
-		}
-		log.Printf("[WHATSAPP-INIT] ✅ WhatsMeow reconnecté avec succès avec le JID: %s", Client.Store.ID.User)
+		return startNewPairing()
 	}
 
+	// Try to connect with existing session
+	log.Printf("[WHATSAPP-INIT] 🔄 Existing session found for JID: %s", Client.Store.ID.User)
+	err = Client.Connect()
+	if err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ Failed to reconnect with existing session: %v", err)
+		log.Printf("[WHATSAPP-INIT] 🔄 Forcing new pairing by clearing device store...")
+		// Clear the invalid session and force new pairing
+		if clearErr := clearDeviceStore(container); clearErr != nil {
+			log.Printf("[WHATSAPP-INIT] ⚠️ Failed to clear device store: %v", clearErr)
+		}
+		return startNewPairing()
+	}
+
+	// Verify we're actually logged in after connect
+	if !Client.IsLoggedIn() {
+		log.Printf("[WHATSAPP-INIT] ⚠️ Connected but not logged in, forcing new pairing...")
+		// Disconnect first to clean up the connection
+		Client.Disconnect()
+		if clearErr := clearDeviceStore(container); clearErr != nil {
+			log.Printf("[WHATSAPP-INIT] ⚠️ Failed to clear device store: %v", clearErr)
+		}
+		// Create a new client with fresh device store
+		newDeviceStore, err := container.GetFirstDevice(context.Background())
+		if err != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ Failed to get new device store: %v", err)
+			return err
+		}
+		clientLog := waLog.Stdout("Client", "INFO", true)
+		Client = whatsmeow.NewClient(newDeviceStore, clientLog)
+		// Re-register handlers
+		RegisterHandlers()
+		registerConnectionStateHandlers()
+		return startNewPairing()
+	}
+
+	log.Printf("[WHATSAPP-INIT] ✅ WhatsMeow reconnecté avec succès avec le JID: %s", Client.Store.ID.User)
+	return nil
+}
+
+// startNewPairing initiates a fresh WhatsApp pairing flow with QR code display
+func startNewPairing() error {
+	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
+	log.Println("[WHATSAPP-INIT] Waiting for QR code scan...")
+
+	qrChan, _ := Client.GetQRChannel(context.Background())
+	err := Client.Connect()
+	if err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
+		return err
+	}
+
+	log.Println("[WHATSAPP-INIT] ✓ Client connection initiated, waiting for QR channel...")
+
+	for evt := range qrChan {
+		if evt.Event == "code" {
+			log.Printf("[WHATSAPP-INIT] 📱 Nouveau QR code WhatsApp généré!")
+			log.Printf("[WHATSAPP-INIT] 📱 Ouvrez /api/whatsapp/qr pour voir le QR code en image")
+
+			// Display QR code in terminal as ASCII/ANSI
+			qrDisplay := renderQRCodeTerminal(evt.Code)
+			log.Printf("%s", qrDisplay)
+
+			setCurrentQR(evt.Code)
+			log.Printf("[WHATSAPP-INIT] ✓ QR code stored and ready for scanning")
+		} else if evt.Event == "success" {
+			log.Printf("[WHATSAPP-INIT] ✅ WhatsApp connected successfully! JID: %s", Client.Store.ID.User)
+		} else {
+			log.Printf("[WHATSAPP-INIT] Statut de connexion: %s", evt.Event)
+		}
+	}
+	return nil
+}
+
+// clearDeviceStore removes the existing device from the database to force new pairing
+func clearDeviceStore(container *sqlstore.Container) error {
+	ctx := context.Background()
+	devices, err := container.GetAllDevices(ctx)
+	if err != nil {
+		return err
+	}
+	for _, device := range devices {
+		if err := container.DeleteDevice(ctx, device); err != nil {
+			log.Printf("[WHATSAPP-INIT] ⚠️ Failed to delete device %s: %v", device.ID, err)
+		} else {
+			log.Printf("[WHATSAPP-INIT] ✓ Deleted device from store: %s", device.ID)
+		}
+	}
 	return nil
 }
 

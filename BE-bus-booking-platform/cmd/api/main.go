@@ -138,10 +138,14 @@ func main() {
 			})
 			return
 		}
+		jid := ""
+		if whatsapp.Client.Store.ID != nil {
+			jid = whatsapp.Client.Store.ID.String()
+		}
 		c.JSON(http.StatusOK, gin.H{
 			"connected":  whatsapp.Client.IsConnected(),
 			"logged_in":  whatsapp.Client.IsLoggedIn(),
-			"jid":        whatsapp.Client.Store.ID.String(),
+			"jid":        jid,
 		})
 	})
 
