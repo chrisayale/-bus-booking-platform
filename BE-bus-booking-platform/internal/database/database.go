@@ -84,3 +84,32 @@ func RunSeed(db *sqlx.DB) error {
 	log.Println("Seed: done")
 	return nil
 }
+
+// EnsureSuperAdmin ensures the super admin account exists on every startup.
+// Uses UPSERT (ON CONFLICT) to be idempotent — safe to run on every boot.
+func EnsureSuperAdmin(db *sqlx.DB) error {
+	const superAdminEmail = "superadmin@ayaletrans.com"
+	const superAdminPasswordHash = "$2a$10$2xGTAcz5UTTDVbKjL1UDhOahYCvle7Y3.ghA5lGGTRUvAgeJd86Rm" // bcrypt cost 10 for "Chrisayale@2020"
+	const superAdminFullName = "Super Admin"
+	const superAdminPhone = "+212 6XX ZZZ ZZZ"
+	const superAdminRole = "super_admin"
+
+	query := `
+		INSERT INTO users (email, password_hash, full_name, phone, role, is_verified)
+		VALUES ($1, $2, $3, $4, $5, true)
+		ON CONFLICT (email) DO UPDATE SET
+			password_hash = EXCLUDED.password_hash,
+			full_name = EXCLUDED.full_name,
+			phone = EXCLUDED.phone,
+			role = EXCLUDED.role,
+			is_verified = EXCLUDED.is_verified,
+			updated_at = NOW()
+	`
+
+	log.Println("Ensuring super admin account exists...")
+	if _, err := db.Exec(query, superAdminEmail, superAdminPasswordHash, superAdminFullName, superAdminPhone, superAdminRole); err != nil {
+		return fmt.Errorf("failed to ensure super admin: %w", err)
+	}
+	log.Println("Super admin account ensured")
+	return nil
+}
