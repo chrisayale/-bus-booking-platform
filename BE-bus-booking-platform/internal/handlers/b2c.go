@@ -69,8 +69,8 @@ func (h *B2CHandler) Register(c *gin.Context) {
 
 		var newOrgID string
 		err = h.DB.QueryRowx(`
-			INSERT INTO organizations (name, email, phone)
-			VALUES ($1, $2, $3)
+			INSERT INTO organizations (name, email, phone, is_active)
+			VALUES ($1, $2, $3, false)
 			RETURNING id`,
 			req.AgencyName, req.Email, models.NullString(req.Phone),
 		).Scan(&newOrgID)
@@ -83,10 +83,10 @@ func (h *B2CHandler) Register(c *gin.Context) {
 
 	var user models.User
 	err = h.DB.QueryRowx(`
-		INSERT INTO users (email, password_hash, full_name, phone, role, organization_id, approval_status)
-		VALUES ($1, $2, $3, $4, $5, $6, $7)
-		RETURNING id, email, full_name, phone, role, organization_id, is_verified, approval_status, created_at, updated_at`,
-		req.Email, hash, req.FullName, models.NullString(req.Phone), role, orgID, approvalStatus,
+		INSERT INTO users (email, password_hash, full_name, phone, role, organization_id, approval_status, is_verified, is_active)
+		VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9)
+		RETURNING id, email, full_name, phone, role, organization_id, is_verified, approval_status, is_active, created_at, updated_at`,
+		req.Email, hash, req.FullName, models.NullString(req.Phone), role, orgID, approvalStatus, false, false,
 	).StructScan(&user)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create user"})
@@ -127,19 +127,30 @@ func (h *B2CHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	if user.Role == "owner" && user.ApprovalStatus == "pending" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending approval"})
-		return
-	}
-	if user.Role == "owner" && user.ApprovalStatus == "rejected" {
-		c.JSON(http.StatusForbidden, gin.H{"error": "your agency account was rejected"})
-		return
-	}
-	if user.Role == "owner" && user.OrganizationID != nil {
-		var orgActive bool
-		if err := h.DB.Get(&orgActive, `SELECT is_active FROM organizations WHERE id = $1`, *user.OrganizationID); err == nil && !orgActive {
-			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account has been deactivated"})
+	if user.Role == "owner" {
+		// Check if user account is active and verified
+		if !user.IsActive {
+			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is inactive. Please contact administrator."})
 			return
+		}
+		if !user.IsVerified {
+			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending email verification"})
+			return
+		}
+		if user.ApprovalStatus == "pending" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account is pending approval"})
+			return
+		}
+		if user.ApprovalStatus == "rejected" {
+			c.JSON(http.StatusForbidden, gin.H{"error": "your agency account was rejected"})
+			return
+		}
+		if user.OrganizationID != nil {
+			var orgActive bool
+			if err := h.DB.Get(&orgActive, `SELECT is_active FROM organizations WHERE id = $1`, *user.OrganizationID); err == nil && !orgActive {
+				c.JSON(http.StatusForbidden, gin.H{"error": "your agency account has been deactivated"})
+				return
+			}
 		}
 	}
 	orgID := ""
