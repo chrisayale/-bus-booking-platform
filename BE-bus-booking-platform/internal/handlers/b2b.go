@@ -711,8 +711,13 @@ func (h *B2BHandler) SetAgencyActive(c *gin.Context) {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update agency status"})
 		return
 	}
-	// Also update the owner user's is_active status
-	_, err = h.DB.Exec(`UPDATE users SET is_active = $1, updated_at = NOW() WHERE organization_id = $2 AND role = 'owner'`, req.IsActive, id)
+	// Also update the owner user's is_active, is_verified, and approval_status
+	// When activating an agency, the owner should be fully verified and approved
+	if req.IsActive {
+		_, err = h.DB.Exec(`UPDATE users SET is_active = true, is_verified = true, approval_status = 'approved', updated_at = NOW() WHERE organization_id = $1 AND role = 'owner'`, id)
+	} else {
+		_, err = h.DB.Exec(`UPDATE users SET is_active = false, updated_at = NOW() WHERE organization_id = $1 AND role = 'owner'`, id)
+	}
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update owner user status"})
 		return

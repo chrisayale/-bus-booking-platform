@@ -127,17 +127,15 @@ func (h *B2CHandler) Login(c *gin.Context) {
 		c.JSON(http.StatusUnauthorized, gin.H{"error": "invalid credentials"})
 		return
 	}
-	// Check if user account is active and verified for all roles that require it
+
+	// Check if user account is active for all roles that require it
 	if user.Role == "owner" || user.Role == "platform_admin" || user.Role == "super_admin" {
 		if !user.IsActive {
 			c.JSON(http.StatusForbidden, gin.H{"error": "your account is inactive. Please contact administrator."})
 			return
 		}
-		if !user.IsVerified {
-			c.JSON(http.StatusForbidden, gin.H{"error": "your account is pending email verification"})
-			return
-		}
 	}
+
 	// Additional checks for owner role
 	if user.Role == "owner" {
 		if user.ApprovalStatus == "pending" {
@@ -154,7 +152,20 @@ func (h *B2CHandler) Login(c *gin.Context) {
 				c.JSON(http.StatusForbidden, gin.H{"error": "your agency account has been deactivated"})
 				return
 			}
+			// If organization is active, admin has approved - allow login even if email not verified
+			// (admin approval overrides email verification requirement)
+			if orgActive && !user.IsVerified {
+				// Update user to mark as verified since admin approved
+				h.DB.Exec(`UPDATE users SET is_verified = true, updated_at = NOW() WHERE id = $1`, user.ID)
+				user.IsVerified = true
+			}
 		}
+	}
+
+	// For platform_admin and super_admin, still require email verification
+	if (user.Role == "platform_admin" || user.Role == "super_admin") && !user.IsVerified {
+		c.JSON(http.StatusForbidden, gin.H{"error": "your account is pending email verification"})
+		return
 	}
 	orgID := ""
 	if user.OrganizationID != nil {
