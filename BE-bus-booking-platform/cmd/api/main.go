@@ -37,8 +37,12 @@ func main() {
 	whatsapp.FlexPay = payments.NewFlexPayProvider()
 	whatsapp.StartPaymentTimeoutWorker()
 	go func() {
+		log.Println("[MAIN] Starting WhatsApp connection in background...")
 		if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
-			log.Printf("Warning: WhatsApp connection failed: %v", err)
+			log.Printf("[MAIN] ❌ WhatsApp connection failed: %v", err)
+			log.Printf("[MAIN] ⚠️  WhatsApp will not be available. Check logs above for QR code or connection errors.")
+		} else {
+			log.Println("[MAIN] ✅ WhatsApp connection established successfully")
 		}
 	}()
 	if err := database.RunMigrations(db); err != nil {
