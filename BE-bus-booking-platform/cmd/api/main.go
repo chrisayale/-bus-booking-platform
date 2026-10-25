@@ -4,6 +4,7 @@ import (
 	"log"
 	"net/http"
 	"os"
+	"strings"
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/config"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/database"
@@ -37,6 +38,10 @@ func main() {
 	log.Printf("[MAIN] AppURL set to: %s", whatsapp.AppURL) // Debug logging
 	whatsapp.FlexPay = payments.NewFlexPayProvider()
 	whatsapp.StartPaymentTimeoutWorker()
+
+	// Check database URL before starting WhatsApp
+	log.Printf("[MAIN] DatabaseURL for WhatsApp: %s", maskDatabaseURL(cfg.DatabaseURL))
+
 	go func() {
 		log.Println("[MAIN] Starting WhatsApp connection in background...")
 		if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
@@ -362,4 +367,19 @@ func main() {
 	if err := r.Run(":" + port); err != nil {
 		log.Fatalf("Failed to start server: %v", err)
 	}
+}
+
+// maskDatabaseURL masks the password in database URL for logging
+func maskDatabaseURL(url string) string {
+	// Simple masking: replace password part with ***
+	if idx := strings.Index(url, "://"); idx != -1 {
+		rest := url[idx+3:]
+		if atIdx := strings.Index(rest, "@"); atIdx != -1 {
+			userPass := rest[:atIdx]
+			if colonIdx := strings.Index(userPass, ":"); colonIdx != -1 {
+				return url[:idx+3] + userPass[:colonIdx+1] + "***" + rest[atIdx:]
+			}
+		}
+	}
+	return url
 }

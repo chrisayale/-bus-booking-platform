@@ -65,14 +65,16 @@ func Connect(databaseURL string) error {
 
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
+	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(databaseURL))
 	container, err := sqlstore.New(context.Background(), "postgres", databaseURL, dbLog)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to create SQL store: %v", err)
-		return err
+		return fmt.Errorf("sqlstore.New failed: %w", err)
 	}
 	log.Println("[WHATSAPP-INIT] ✓ SQL store created successfully")
 
 	// Try to get existing device store first (preserve WhatsApp session across restarts)
+	log.Println("[WHATSAPP-INIT] 🔍 Checking for existing device store...")
 	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ⚠️ No existing device store found: %v", err)
@@ -82,9 +84,10 @@ func Connect(databaseURL string) error {
 		deviceStore = container.NewDevice()
 		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
 			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
-			return err
+			return fmt.Errorf("PutDevice failed: %w", err)
 		}
 		log.Println("[WHATSAPP-INIT] ✓ New device store created and saved")
+		log.Printf("[WHATSAPP-INIT] ✓ New device JID: %s", deviceStore.ID.String())
 	} else {
 		log.Printf("[WHATSAPP-INIT] ✓ Existing device store retrieved (session preserved)")
 		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
@@ -109,7 +112,7 @@ func Connect(databaseURL string) error {
 		err := Client.Connect()
 		if err != nil {
 			log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
-			return err
+			return fmt.Errorf("Client.Connect failed: %w", err)
 		}
 		log.Println("[WHATSAPP-INIT] ✅ WhatsApp reconnected successfully")
 		return nil
@@ -118,7 +121,28 @@ func Connect(databaseURL string) error {
 	// No existing session - start fresh pairing
 	log.Println("[WHATSAPP-INIT] ⚠️ No paired device found (Store.ID is nil)")
 	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
-	return startNewPairing()
+	err = startNewPairing()
+	if err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ startNewPairing failed: %v", err)
+		return fmt.Errorf("startNewPairing failed: %w", err)
+	}
+	log.Println("[WHATSAPP-INIT] ✓ startNewPairing initiated successfully")
+	return nil
+}
+
+// maskDatabaseURL masks the password in database URL for logging
+func maskDatabaseURL(url string) string {
+	// Simple masking: replace password part with ***
+	if idx := strings.Index(url, "://"); idx != -1 {
+		rest := url[idx+3:]
+		if atIdx := strings.Index(rest, "@"); atIdx != -1 {
+			userPass := rest[:atIdx]
+			if colonIdx := strings.Index(userPass, ":"); colonIdx != -1 {
+				return url[:idx+3] + userPass[:colonIdx+1] + "***" + rest[atIdx:]
+			}
+		}
+	}
+	return url
 }
 
 // startNewPairing initiates a fresh WhatsApp pairing flow with QR code display
