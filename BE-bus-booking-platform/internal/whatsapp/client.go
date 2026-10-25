@@ -73,60 +73,37 @@ func Connect(databaseURL string) error {
 	}
 	log.Println("[WHATSAPP-INIT] ✓ SQL store created successfully")
 
-	// Try to get existing device store first (preserve WhatsApp session across restarts)
-	log.Println("[WHATSAPP-INIT] 🔍 Checking for existing device store...")
-	deviceStore, err := container.GetFirstDevice(context.Background())
-	if err != nil {
-		log.Printf("[WHATSAPP-INIT] ⚠️ No existing device store found: %v", err)
-		log.Println("[WHATSAPP-INIT] 🔄 Creating new device store for initial pairing...")
-
-		// Create new device store for first-time pairing
-		deviceStore = container.NewDevice()
-		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
-			return fmt.Errorf("PutDevice failed: %w", err)
-		}
-		log.Println("[WHATSAPP-INIT] ✓ New device store created and saved")
-		log.Printf("[WHATSAPP-INIT] ✓ New device JID: %s", deviceStore.ID.String())
-	} else {
-		log.Printf("[WHATSAPP-INIT] ✓ Existing device store retrieved (session preserved)")
-		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
+	// FORCE FRESH PAIRING: Clear all existing devices to avoid stale/invalid sessions
+	log.Println("[WHATSAPP-INIT] 🔄 Forcing fresh pairing - clearing existing device store...")
+	if err := clearDeviceStore(container); err != nil {
+		log.Printf("[WHATSAPP-INIT] ⚠️ Warning clearing device store: %v", err)
 	}
 
+	// Create brand new device store for fresh pairing
+	deviceStore := container.NewDevice()
+	if err := container.PutDevice(context.Background(), deviceStore); err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
+		return fmt.Errorf("PutDevice failed: %w", err)
+	}
+	log.Println("[WHATSAPP-INIT] ✓ Fresh device store created")
+	log.Printf("[WHATSAPP-INIT] ✓ New device JID: %s", deviceStore.ID.String())
+
+	// INSTANTIATE CLIENT IMMEDIATELY - always available globally
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	Client = whatsmeow.NewClient(deviceStore, clientLog)
-	log.Printf("[WHATSAPP-INIT] ✓ WhatsMeow client created")
+	log.Printf("[WHATSAPP-INIT] ✓ WhatsMeow client created and stored in global variable")
 
 	// CRITICAL: Register event handlers BEFORE connecting
-	// This ensures we receive all events including historical messages on reconnect
 	RegisterHandlers()
 	log.Printf("[WHATSAPP] Event handlers registered")
 
 	// Register connection state event handlers for diagnostics
 	registerConnectionStateHandlers()
 
-	// Check if already logged in (has valid session)
-	if Client.Store.ID != nil {
-		log.Printf("[WHATSAPP-INIT] ✅ WhatsApp already logged in as: %s", Client.Store.ID.String())
-		log.Println("[WHATSAPP-INIT] 🔌 Connecting to WhatsApp...")
-		err := Client.Connect()
-		if err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
-			return fmt.Errorf("Client.Connect failed: %w", err)
-		}
-		log.Println("[WHATSAPP-INIT] ✅ WhatsApp reconnected successfully")
-		return nil
-	}
-
-	// No existing session - start fresh pairing
-	log.Println("[WHATSAPP-INIT] ⚠️ No paired device found (Store.ID is nil)")
-	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
-	err = startNewPairing()
-	if err != nil {
-		log.Printf("[WHATSAPP-INIT] ❌ startNewPairing failed: %v", err)
-		return fmt.Errorf("startNewPairing failed: %w", err)
-	}
-	log.Println("[WHATSAPP-INIT] ✓ startNewPairing initiated successfully")
+	// Start fresh pairing with QR code generation
+	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing with QR code...")
+	startNewPairing()
+	log.Println("[WHATSAPP-INIT] ✓ startNewPairing initiated in background")
 	return nil
 }
 
@@ -146,7 +123,8 @@ func maskDatabaseURL(url string) string {
 }
 
 // startNewPairing initiates a fresh WhatsApp pairing flow with QR code display
-func startNewPairing() error {
+// Runs in a goroutine so Connect() returns immediately while pairing continues in background
+func startNewPairing() {
 	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
 	log.Println("[WHATSAPP-INIT] Waiting for QR code scan...")
 
@@ -154,29 +132,32 @@ func startNewPairing() error {
 	err := Client.Connect()
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
-		return err
+		// Don't return error - just log it, pairing will retry on reconnect
+		return
 	}
 
 	log.Println("[WHATSAPP-INIT] ✓ Client connection initiated, waiting for QR channel...")
 
-	for evt := range qrChan {
-		if evt.Event == "code" {
-			log.Printf("[WHATSAPP-INIT] 📱 Nouveau QR code WhatsApp généré!")
-			log.Printf("[WHATSAPP-INIT] 📱 Ouvrez /api/whatsapp/qr pour voir le QR code en image")
+	// Process QR channel events in a goroutine so Connect() can return
+	go func() {
+		for evt := range qrChan {
+			if evt.Event == "code" {
+				log.Printf("[WHATSAPP-INIT] 📱 Nouveau QR code WhatsApp généré!")
+				log.Printf("[WHATSAPP-INIT] 📱 Ouvrez /api/whatsapp/qr pour voir le QR code en image")
 
-			// Display QR code in terminal as ASCII/ANSI
-			qrDisplay := renderQRCodeTerminal(evt.Code)
-			log.Printf("%s", qrDisplay)
+				// Display QR code in terminal as ASCII/ANSI
+				qrDisplay := renderQRCodeTerminal(evt.Code)
+				log.Printf("%s", qrDisplay)
 
-			setCurrentQR(evt.Code)
-			log.Printf("[WHATSAPP-INIT] ✓ QR code stored and ready for scanning")
-		} else if evt.Event == "success" {
-			log.Printf("[WHATSAPP-INIT] ✅ WhatsApp connected successfully! JID: %s", Client.Store.ID.User)
-		} else {
-			log.Printf("[WHATSAPP-INIT] Statut de connexion: %s", evt.Event)
+				setCurrentQR(evt.Code)
+				log.Printf("[WHATSAPP-INIT] ✓ QR code stored and ready for scanning")
+			} else if evt.Event == "success" {
+				log.Printf("[WHATSAPP-INIT] ✅ WhatsApp connected successfully! JID: %s", Client.Store.ID.User)
+			} else {
+				log.Printf("[WHATSAPP-INIT] Statut de connexion: %s", evt.Event)
+			}
 		}
-	}
-	return nil
+	}()
 }
 
 // clearDeviceStore removes the existing device from the database to force new pairing
