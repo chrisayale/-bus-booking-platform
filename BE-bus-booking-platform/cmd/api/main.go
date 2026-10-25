@@ -42,15 +42,16 @@ func main() {
 	// Check database URL before starting WhatsApp
 	log.Printf("[MAIN] DatabaseURL for WhatsApp: %s", maskDatabaseURL(cfg.DatabaseURL))
 
-	// Initialize WhatsApp SYNCHRONOUSLY to ensure logs appear and connection is ready
-	log.Println("[MAIN] Starting WhatsApp connection (synchronous)...")
-	if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
-		log.Printf("[MAIN] ❌ WhatsApp connection failed: %v", err)
-		log.Printf("[MAIN] ⚠️  WhatsApp will not be available. Check logs above for QR code or connection errors.")
-		// Don't fatal - allow server to start without WhatsApp
-	} else {
-		log.Println("[MAIN] ✅ WhatsApp connection established successfully")
-	}
+	// Initialize WhatsApp in BACKGROUND GOROUTINE so HTTP server starts immediately for health checks
+	go func() {
+		log.Println("[WHATSAPP-INIT] Starting WhatsApp connection in background...")
+		if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ WhatsApp connection failed: %v", err)
+			log.Printf("[WHATSAPP-INIT] ⚠️  WhatsApp will not be available. Check logs above for QR code or connection errors.")
+		} else {
+			log.Println("[WHATSAPP-INIT] ✅ WhatsApp connection established successfully")
+		}
+	}()
 	if err := database.RunMigrations(db); err != nil {
 		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
 	}
