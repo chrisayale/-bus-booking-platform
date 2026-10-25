@@ -3,6 +3,7 @@ package main
 import (
 	"log"
 	"net/http"
+	"os"
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/config"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/database"
@@ -50,8 +51,13 @@ func main() {
 	}
 
 	// Clean up test agencies and accounts (except super admin) for fresh registrations
-	if err := database.CleanupTestData(db); err != nil {
-		log.Printf("Warning: failed to cleanup test data: %v", err)
+	// ONLY run in non-production environments to prevent accidental data loss
+	if os.Getenv("ENVIRONMENT") != "production" {
+		if err := database.CleanupTestData(db); err != nil {
+			log.Printf("Warning: failed to cleanup test data: %v", err)
+		}
+	} else {
+		log.Println("[MAIN] Skipping CleanupTestData in production environment")
 	}
 
 	// Ensure super admin account exists on every startup (idempotent UPSERT)

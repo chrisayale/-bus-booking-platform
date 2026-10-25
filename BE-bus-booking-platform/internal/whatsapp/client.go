@@ -72,21 +72,23 @@ func Connect(databaseURL string) error {
 	}
 	log.Println("[WHATSAPP-INIT] ✓ SQL store created successfully")
 
-	// FORCE RESET: Always clear existing devices to force new QR code generation
-	log.Println("[WHATSAPP-INIT] 🔄 Force reset: clearing existing device store...")
-	if clearErr := clearDeviceStore(container); clearErr != nil {
-		log.Printf("[WHATSAPP-INIT] ⚠️ Failed to clear device store: %v", clearErr)
-	} else {
-		log.Println("[WHATSAPP-INIT] ✓ Device store cleared successfully")
-	}
-
-	// Get a fresh device store (will create new one since we cleared all)
+	// Try to get existing device store first (preserve WhatsApp session across restarts)
 	deviceStore, err := container.GetFirstDevice(context.Background())
 	if err != nil {
-		log.Printf("[WHATSAPP-INIT] ❌ Failed to get device store: %v", err)
-		return err
+		log.Printf("[WHATSAPP-INIT] ⚠️ No existing device store found: %v", err)
+		log.Println("[WHATSAPP-INIT] 🔄 Creating new device store for initial pairing...")
+
+		// Create new device store for first-time pairing
+		deviceStore = container.NewDevice()
+		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
+			return err
+		}
+		log.Println("[WHATSAPP-INIT] ✓ New device store created and saved")
+	} else {
+		log.Printf("[WHATSAPP-INIT] ✓ Existing device store retrieved (session preserved)")
+		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
 	}
-	log.Println("[WHATSAPP-INIT] ✓ Fresh device store retrieved")
 
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	Client = whatsmeow.NewClient(deviceStore, clientLog)
@@ -100,8 +102,22 @@ func Connect(databaseURL string) error {
 	// Register connection state event handlers for diagnostics
 	registerConnectionStateHandlers()
 
-	// Start fresh pairing - will generate new QR code
+	// Check if already logged in (has valid session)
+	if Client.Store.ID != nil {
+		log.Printf("[WHATSAPP-INIT] ✅ WhatsApp already logged in as: %s", Client.Store.ID.String())
+		log.Println("[WHATSAPP-INIT] 🔌 Connecting to WhatsApp...")
+		err := Client.Connect()
+		if err != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
+			return err
+		}
+		log.Println("[WHATSAPP-INIT] ✅ WhatsApp reconnected successfully")
+		return nil
+	}
+
+	// No existing session - start fresh pairing
 	log.Println("[WHATSAPP-INIT] ⚠️ No paired device found (Store.ID is nil)")
+	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
 	return startNewPairing()
 }
 
