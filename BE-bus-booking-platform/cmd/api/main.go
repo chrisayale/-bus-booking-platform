@@ -20,6 +20,9 @@ import (
 )
 
 func main() {
+	// IMMEDIATE STARTUP LOG - confirms binary is running
+	log.Println("[MAIN] ===== SERVER STARTING - MAIN() ENTRY POINT =====")
+
 	// Load .env file if it exists
 	godotenv.Load()
 
