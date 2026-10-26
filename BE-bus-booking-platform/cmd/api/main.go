@@ -20,7 +20,7 @@ import (
 )
 
 func main() {
-	// IMMEDIATE STARTUP LOG - confirms binary is running
+	// FORCE REBUILD 2026-10-26-v3 - IMMEDIATE STARTUP LOG - confirms binary is running
 	log.Println("[MAIN] ===== SERVER STARTING - MAIN() ENTRY POINT =====")
 
 	// Load .env file if it exists
