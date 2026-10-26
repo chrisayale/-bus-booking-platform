@@ -69,13 +69,14 @@ func Connect(databaseURL string) error {
 	// "unnamed prepared statement does not exist" errors with lib/pq driver
 	dbURL := addPgBouncerParams(databaseURL)
 
+	log.Printf("[WHATSAPP-DEBUG] Initialisation du SQL store...")
 	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(dbURL))
 	container, err := sqlstore.New(context.Background(), "postgres", dbURL, dbLog)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to create SQL store: %v", err)
 		return fmt.Errorf("sqlstore.New failed: %w", err)
 	}
-	log.Println("[WHATSAPP-INIT] ✓ SQL store created successfully")
+	log.Println("[WHATSAPP-DEBUG] SQL store créé, instanciation du client NewClient...")
 
 	// Try to get existing device store first (preserve WhatsApp session across restarts)
 	log.Println("[WHATSAPP-INIT] 🔍 Checking for existing device store...")
@@ -138,13 +139,16 @@ func startNewPairing() {
 	log.Println("[WHATSAPP-INIT] Waiting for QR code scan...")
 
 	// 1. FIRST: Start connection (this blocks until QR is needed or connected)
+	log.Printf("[WHATSAPP-DEBUG] Appel de Client.Connect()...")
 	err := Client.Connect()
+	log.Printf("[WHATSAPP-DEBUG] Client.Connect() terminé, err = %v", err)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
 		return
 	}
 
 	// 2. THEN: Get QR channel (only valid after Connect() starts)
+	log.Printf("[WHATSAPP-DEBUG] Récupération du canal GetQRChannel...")
 	qrChan, err := Client.GetQRChannel(context.Background())
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to get QR channel: %v", err)
@@ -156,6 +160,7 @@ func startNewPairing() {
 	// 3. Process QR events in background goroutine
 	go func() {
 		for evt := range qrChan {
+			log.Printf("[WHATSAPP-DEBUG] Événement QR reçu: type=%s, code=%s", evt.Event, evt.Code)
 			if evt.Event == "code" {
 				log.Printf("[WHATSAPP-INIT] 📱 Nouveau QR code WhatsApp généré!")
 				log.Printf("[WHATSAPP-INIT] 📱 Ouvrez /api/whatsapp/qr pour voir le QR code en image")
