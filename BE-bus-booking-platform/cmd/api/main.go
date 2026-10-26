@@ -5,6 +5,7 @@ import (
 	"net/http"
 	"os"
 	"strings"
+	"time"
 
 	"github.com/bus-booking/BE-bus-booking-platform/internal/config"
 	"github.com/bus-booking/BE-bus-booking-platform/internal/database"
@@ -52,6 +53,7 @@ func main() {
 	log.Printf("[MAIN] DatabaseURL for WhatsApp (with PgBouncer param): %s", maskDatabaseURL(whatsappDBURL))
 
 	// Initialize WhatsApp in BACKGROUND GOROUTINE so HTTP server starts immediately for health checks
+	log.Println("[MAIN] 🚀 LAUNCHING WhatsApp initialization goroutine...")
 	go func() {
 		defer func() {
 			if r := recover(); r != nil {
@@ -66,6 +68,10 @@ func main() {
 			log.Println("[WHATSAPP-INIT] ✅ WhatsApp connection established successfully")
 		}
 	}()
+
+	// Small sleep to allow goroutine to start and log first message
+	time.Sleep(100 * time.Millisecond)
+	log.Println("[MAIN] ✓ WhatsApp goroutine launched")
 	if err := database.RunMigrations(db); err != nil {
 		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
 	}
