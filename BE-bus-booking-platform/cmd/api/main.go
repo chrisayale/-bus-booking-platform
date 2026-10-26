@@ -43,18 +43,6 @@ func main() {
 	whatsapp.FlexPay = payments.NewFlexPayProvider()
 	whatsapp.StartPaymentTimeoutWorker()
 
-	// Check database URL before starting WhatsApp
-	// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe
-	whatsappDBURL := cfg.DatabaseURL
-	if !strings.Contains(whatsappDBURL, "statement_cache_mode=") {
-		if strings.Contains(whatsappDBURL, "?") {
-			whatsappDBURL += "&statement_cache_mode=describe"
-		} else {
-			whatsappDBURL += "?statement_cache_mode=describe"
-		}
-	}
-	log.Printf("[MAIN] DatabaseURL for WhatsApp (with PgBouncer param): %s", maskDatabaseURL(whatsappDBURL))
-
 	// Initialize WhatsApp in BACKGROUND GOROUTINE so HTTP server starts immediately for health checks
 	log.Println("[MAIN] 🚀 LAUNCHING WhatsApp initialization goroutine...")
 	go func() {
@@ -63,10 +51,22 @@ func main() {
 				log.Printf("[WHATSAPP-INIT] ❌ PANIC: %v", r)
 			}
 		}()
+		dbURL := os.Getenv("DATABASE_URL")
+		if dbURL == "" {
+			log.Println("[WHATSAPP-INIT] ❌ DATABASE_URL is empty!")
+			return
+		}
+		// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe
+		if !strings.Contains(dbURL, "statement_cache_mode=") {
+			if strings.Contains(dbURL, "?") {
+				dbURL += "&statement_cache_mode=describe"
+			} else {
+				dbURL += "?statement_cache_mode=describe"
+			}
+		}
 		log.Println("[WHATSAPP-INIT] Starting WhatsApp connection in background...")
-		if err := whatsapp.Connect(whatsappDBURL); err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ ERROR: %v", err)
-			log.Printf("[WHATSAPP-INIT] ⚠️  WhatsApp will not be available. Check logs above for QR code or connection errors.")
+		if err := whatsapp.Connect(dbURL); err != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ Erreur d'initialisation : %v", err)
 		} else {
 			log.Println("[WHATSAPP-INIT] ✅ WhatsApp connection established successfully")
 		}
