@@ -44,9 +44,14 @@ func main() {
 
 	// Initialize WhatsApp in BACKGROUND GOROUTINE so HTTP server starts immediately for health checks
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[WHATSAPP-INIT] ❌ PANIC: %v", r)
+			}
+		}()
 		log.Println("[WHATSAPP-INIT] Starting WhatsApp connection in background...")
 		if err := whatsapp.Connect(cfg.DatabaseURL); err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ WhatsApp connection failed: %v", err)
+			log.Printf("[WHATSAPP-INIT] ❌ ERROR: %v", err)
 			log.Printf("[WHATSAPP-INIT] ⚠️  WhatsApp will not be available. Check logs above for QR code or connection errors.")
 		} else {
 			log.Println("[WHATSAPP-INIT] ✅ WhatsApp connection established successfully")
