@@ -93,12 +93,12 @@ func Connect(databaseURL string) error {
 	// Try to get existing device store first (preserve WhatsApp session across restarts)
 	log.Println("[WHATSAPP-INIT] 🔍 Checking for existing device store...")
 	deviceStore, err := container.GetFirstDevice(context.Background())
-	if err != nil {
-		log.Printf("[WHATSAPP-INIT] ⚠️ No existing device store found: %v", err)
-		log.Println("[WHATSAPP-INIT] 🔄 Creating new device store for initial pairing...")
-
-		// Create new device store for first-time pairing
+	if err != nil || deviceStore == nil {
+		log.Printf("[WHATSAPP-INIT] ⚠️ Aucun device valide trouvé (ou erreur: %v), création d'un nouveau store...", err)
 		deviceStore = container.NewDevice()
+		if deviceStore == nil {
+			return fmt.Errorf("failed to create new device store")
+		}
 		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
 			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
 			return fmt.Errorf("PutDevice failed: %w", err)
@@ -109,10 +109,6 @@ func Connect(databaseURL string) error {
 		log.Printf("[WHATSAPP-INIT] ✓ Existing device store retrieved (session preserved)")
 		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
 	}
-
-	// STEP-BY-STEP TRACE LOGS
-	log.Printf("[WHATSAPP-DEBUG] deviceStore ID: %v", deviceStore.ID)
-	log.Printf("[WHATSAPP-DEBUG] deviceStore type: %T", deviceStore)
 
 	// SAFETY CHECK: Ensure deviceStore is not nil
 	if deviceStore == nil {
