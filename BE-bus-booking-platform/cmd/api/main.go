@@ -35,6 +35,11 @@ func main() {
 	}
 	defer db.Close()
 
+	// Run migrations FIRST so tables exist before WhatsApp connects
+	if err := database.RunMigrations(db); err != nil {
+		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
+	}
+
 	// Connect to WhatsApp
 	whatsapp.DB = db
 	whatsapp.QRSecret = cfg.JWTSecret
@@ -57,11 +62,15 @@ func main() {
 			return
 		}
 		// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe
-		if !strings.Contains(dbURL, "statement_cache_mode=") {
-			if strings.Contains(dbURL, "?") {
-				dbURL += "&statement_cache_mode=describe"
-			} else {
-				dbURL += "?statement_cache_mode=describe"
+		// Only add this parameter for pooled connections (e.g., Neon, PgBouncer)
+		// Local PostgreSQL doesn't support this parameter
+		if strings.Contains(dbURL, "neon.tech") || strings.Contains(dbURL, "pgbouncer") || strings.Contains(dbURL, "pooler") {
+			if !strings.Contains(dbURL, "statement_cache_mode=") {
+				if strings.Contains(dbURL, "?") {
+					dbURL += "&statement_cache_mode=describe"
+				} else {
+					dbURL += "?statement_cache_mode=describe"
+				}
 			}
 		}
 		log.Println("[WHATSAPP-INIT] Starting WhatsApp connection in background...")
@@ -75,9 +84,6 @@ func main() {
 	// Small sleep to allow goroutine to start and log first message
 	time.Sleep(100 * time.Millisecond)
 	log.Println("[MAIN] ✓ WhatsApp goroutine launched")
-	if err := database.RunMigrations(db); err != nil {
-		log.Printf("Warning: migration error (may be OK if already applied): %v", err)
-	}
 
 	// Clean up test agencies and accounts (except super admin) for fresh registrations
 	// ONLY run in non-production environments to prevent accidental data loss

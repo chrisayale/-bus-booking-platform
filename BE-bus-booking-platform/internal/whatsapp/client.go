@@ -6,6 +6,7 @@ import (
 	"log"
 	"strings"
 	"sync"
+	"time"
 
 	_ "github.com/lib/pq"
 	qrcode "github.com/skip2/go-qrcode"
@@ -63,23 +64,24 @@ func renderQRCodeTerminal(code string) string {
 `, strings.ReplaceAll(code, "\n", "\n║  "))
 }
 
-func Connect(databaseURL string) error {
+func Connect(databaseURL string) (err error) {
+	// Panic recovery to capture any unexpected panics into InitError
+	defer func() {
+		if r := recover(); r != nil {
+			log.Printf("[WHATSAPP-INIT] ❌ PANIC recovered in Connect: %v", r)
+			InitError = fmt.Errorf("panic in Connect: %v", r)
+			err = InitError
+		}
+	}()
+
 	log.Println("[WHATSAPP-INIT] Démarrage du client WhatsMeow...")
 
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
 	// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe to prevent
 	// "unnamed prepared statement does not exist" errors with lib/pq driver
+	// Only adds parameter for pooled connections (Neon, PgBouncer, pooler)
 	dbURL := addPgBouncerParams(databaseURL)
-
-	// SAFETY BELT: Ensure statement_cache_mode=describe is present (handles edge cases)
-	if !strings.Contains(dbURL, "statement_cache_mode=describe") {
-		if strings.Contains(dbURL, "?") {
-			dbURL += "&statement_cache_mode=describe"
-		} else {
-			dbURL += "?statement_cache_mode=describe"
-		}
-	}
 
 	log.Printf("[WHATSAPP-DEBUG] Initialisation du SQL store...")
 	log.Printf("[WHATSAPP-DEBUG] URL de connexion finale (avec PgBouncer param): %s", maskDatabaseURL(dbURL))
@@ -92,27 +94,30 @@ func Connect(databaseURL string) error {
 	}
 	log.Println("[WHATSAPP-DEBUG] SQL store créé, instanciation du client NewClient...")
 
-	// Try to get existing device store first (preserve WhatsApp session across restarts)
-	log.Println("[WHATSAPP-INIT] 🔍 Checking for existing device store...")
-	deviceStore, err := container.GetFirstDevice(context.Background())
-	if err != nil || deviceStore == nil {
-		log.Printf("[WHATSAPP-INIT] ⚠️ Aucun device valide trouvé (ou erreur: %v), création d'un nouveau store...", err)
-		deviceStore = container.NewDevice()
-		if deviceStore == nil {
-			InitError = fmt.Errorf("failed to create new device store")
-			return InitError
+	// Clear the wa_devices table directly using raw SQL to avoid nil ID issues
+	// This ensures a clean slate for device store creation
+	if DB != nil {
+		log.Println("[WHATSAPP-INIT] 🧹 Clearing wa_devices table to ensure clean device store creation...")
+		if _, err := DB.Exec("DELETE FROM wa_devices"); err != nil {
+			log.Printf("[WHATSAPP-INIT] ⚠️ Failed to clear wa_devices table (may not exist yet): %v", err)
+		} else {
+			log.Println("[WHATSAPP-INIT] ✓ wa_devices table cleared successfully")
 		}
-		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
-			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
-			InitError = fmt.Errorf("PutDevice failed: %w", err)
-			return InitError
-		}
-		log.Println("[WHATSAPP-INIT] ✓ New device store created and saved")
-		log.Printf("[WHATSAPP-INIT] ✓ New device JID: %s", deviceStore.ID.String())
 	} else {
-		log.Printf("[WHATSAPP-INIT] ✓ Existing device store retrieved (session preserved)")
-		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
+		log.Println("[WHATSAPP-INIT] ⚠️ DB not initialized, skipping wa_devices table clearing")
 	}
+
+	// Always create a fresh device store since we cleared the table
+	// This avoids issues with whatsmeow returning devices with nil ID
+	log.Println("[WHATSAPP-INIT] 🔄 Creating fresh device store (session not preserved due to nil ID issues)...")
+	deviceStore := container.NewDevice()
+	if deviceStore == nil {
+		InitError = fmt.Errorf("failed to create new device store")
+		return InitError
+	}
+	// NOTE: Do NOT call PutDevice here - the device gets its JID during pairing
+	// whatsmeow will automatically save the device after successful QR pairing
+	log.Println("[WHATSAPP-INIT] ✓ New device store created (will be saved after pairing)")
 
 	// SAFETY CHECK: Ensure deviceStore is not nil
 	if deviceStore == nil {
@@ -120,7 +125,7 @@ func Connect(databaseURL string) error {
 		InitError = fmt.Errorf("deviceStore is nil")
 		return InitError
 	}
-	log.Printf("[WHATSAPP-DEBUG] deviceStore validated, JID: %s", deviceStore.ID.String())
+	log.Printf("[WHATSAPP-DEBUG] deviceStore validated (JID will be assigned after pairing)")
 
 	// INSTANTIATE CLIENT IMMEDIATELY - always available globally
 	log.Printf("[WHATSAPP-DEBUG] Création du clientLog...")
@@ -176,22 +181,22 @@ func startNewPairing() {
 	log.Println("[WHATSAPP-INIT] 🔄 Starting fresh WhatsApp pairing...")
 	log.Println("[WHATSAPP-INIT] Waiting for QR code scan...")
 
-	// 1. FIRST: Start connection (this blocks until QR is needed or connected)
-	log.Printf("[WHATSAPP-DEBUG] Appel de Client.Connect()...")
-	err := Client.Connect()
-	log.Printf("[WHATSAPP-DEBUG] Client.Connect() terminé, err = %v", err)
-	if err != nil {
-		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
-		InitError = fmt.Errorf("Client.Connect() failed: %w", err)
-		return
-	}
-
-	// 2. THEN: Get QR channel (only valid after Connect() starts)
+	// 1. FIRST: Get QR channel (must be called before Connect())
 	log.Printf("[WHATSAPP-DEBUG] Récupération du canal GetQRChannel...")
 	qrChan, err := Client.GetQRChannel(context.Background())
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to get QR channel: %v", err)
 		InitError = fmt.Errorf("GetQRChannel failed: %w", err)
+		return
+	}
+
+	// 2. THEN: Start connection (this blocks until QR is needed or connected)
+	log.Printf("[WHATSAPP-DEBUG] Appel de Client.Connect()...")
+	err = Client.Connect()
+	log.Printf("[WHATSAPP-DEBUG] Client.Connect() terminé, err = %v", err)
+	if err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
+		InitError = fmt.Errorf("Client.Connect() failed: %w", err)
 		return
 	}
 
@@ -219,10 +224,20 @@ func startNewPairing() {
 				log.Printf("[WHATSAPP-INIT] ✓ QR code stored and ready for scanning")
 			} else if evt.Event == "success" {
 				log.Printf("[WHATSAPP-INIT] ✅ WhatsApp connected successfully! JID: %s", Client.Store.ID.User)
+			} else if evt.Event == "timeout" {
+				log.Printf("[WHATSAPP-INIT] ⏱️ QR code timed out, restarting pairing...")
+				// Restart pairing after a short delay
+				go func() {
+					time.Sleep(5 * time.Second)
+					log.Println("[WHATSAPP-INIT] 🔄 Restarting pairing after timeout...")
+					startNewPairing()
+				}()
 			} else {
 				log.Printf("[WHATSAPP-INIT] Statut de connexion: %s", evt.Event)
 			}
 		}
+		// Channel closed - this happens on timeout or error
+		log.Println("[WHATSAPP-INIT] QR channel closed, pairing session ended")
 	}()
 }
 
@@ -245,7 +260,17 @@ func clearDeviceStore(container *sqlstore.Container) error {
 
 // addPgBouncerParams adds PgBouncer-compatible parameters to the PostgreSQL connection string
 // to prevent "unnamed prepared statement does not exist" errors with lib/pq driver
+// Only adds the parameter for pooled connections (Neon, PgBouncer, pooler)
 func addPgBouncerParams(dbURL string) string {
+	// Only add for pooled connections
+	isPooled := strings.Contains(dbURL, "neon.tech") ||
+		strings.Contains(dbURL, "pgbouncer") ||
+		strings.Contains(dbURL, "pooler")
+
+	if !isPooled {
+		return dbURL
+	}
+
 	// Check if already has query parameters
 	hasQuery := strings.Contains(dbURL, "?")
 
