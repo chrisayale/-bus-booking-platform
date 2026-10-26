@@ -71,6 +71,15 @@ func Connect(databaseURL string) error {
 	// "unnamed prepared statement does not exist" errors with lib/pq driver
 	dbURL := addPgBouncerParams(databaseURL)
 
+	// SAFETY BELT: Ensure statement_cache_mode=describe is present (handles edge cases)
+	if !strings.Contains(dbURL, "statement_cache_mode=describe") {
+		if strings.Contains(dbURL, "?") {
+			dbURL += "&statement_cache_mode=describe"
+		} else {
+			dbURL += "?statement_cache_mode=describe"
+		}
+	}
+
 	log.Printf("[WHATSAPP-DEBUG] Initialisation du SQL store...")
 	log.Printf("[WHATSAPP-DEBUG] URL de connexion finale (avec PgBouncer param): %s", maskDatabaseURL(dbURL))
 	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(dbURL))
