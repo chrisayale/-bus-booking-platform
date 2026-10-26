@@ -70,6 +70,7 @@ func Connect(databaseURL string) error {
 	dbURL := addPgBouncerParams(databaseURL)
 
 	log.Printf("[WHATSAPP-DEBUG] Initialisation du SQL store...")
+	log.Printf("[WHATSAPP-DEBUG] URL de connexion finale (avec PgBouncer param): %s", maskDatabaseURL(dbURL))
 	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(dbURL))
 	container, err := sqlstore.New(context.Background(), "postgres", dbURL, dbLog)
 	if err != nil {
