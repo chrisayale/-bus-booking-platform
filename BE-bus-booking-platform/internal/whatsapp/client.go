@@ -65,8 +65,12 @@ func Connect(databaseURL string) error {
 
 	dbLog := waLog.Stdout("Database", "INFO", true)
 
-	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(databaseURL))
-	container, err := sqlstore.New(context.Background(), "postgres", databaseURL, dbLog)
+	// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe to prevent
+	// "unnamed prepared statement does not exist" errors with lib/pq driver
+	dbURL := addPgBouncerParams(databaseURL)
+
+	log.Printf("[WHATSAPP-INIT] 🔗 Connecting to database: %s", maskDatabaseURL(dbURL))
+	container, err := sqlstore.New(context.Background(), "postgres", dbURL, dbLog)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to create SQL store: %v", err)
 		return fmt.Errorf("sqlstore.New failed: %w", err)
@@ -186,6 +190,25 @@ func clearDeviceStore(container *sqlstore.Container) error {
 		}
 	}
 	return nil
+}
+
+// addPgBouncerParams adds PgBouncer-compatible parameters to the PostgreSQL connection string
+// to prevent "unnamed prepared statement does not exist" errors with lib/pq driver
+func addPgBouncerParams(dbURL string) string {
+	// Check if already has query parameters
+	hasQuery := strings.Contains(dbURL, "?")
+
+	// Add statement_cache_mode=describe for PgBouncer compatibility
+	param := "statement_cache_mode=describe"
+
+	if hasQuery {
+		// Check if parameter already exists
+		if strings.Contains(dbURL, "statement_cache_mode=") {
+			return dbURL
+		}
+		return dbURL + "&" + param
+	}
+	return dbURL + "?" + param
 }
 
 // registerConnectionStateHandlers registers handlers for connection state events
