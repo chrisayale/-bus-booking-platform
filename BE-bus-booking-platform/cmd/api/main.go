@@ -154,8 +154,14 @@ func main() {
 	// WhatsApp QR code endpoint
 	r.GET("/api/whatsapp/qr", func(c *gin.Context) {
 		qr := whatsapp.GetCurrentQR()
+		client := whatsapp.Client
 		if qr == nil {
-			c.JSON(http.StatusNotFound, gin.H{"error": "QR code not available"})
+			c.JSON(http.StatusInternalServerError, gin.H{
+				"error":           "QR code not available",
+				"client_nil":      client == nil,
+				"qr_nil":          true,
+				"status":          "QR code not yet generated - check WhatsApp initialization logs",
+			})
 			return
 		}
 		c.Header("Content-Type", "image/png")

@@ -28,11 +28,13 @@ func GetCurrentQR() []byte {
 func setCurrentQR(code string) {
 	png, err := qrcode.Encode(code, qrcode.Medium, 400)
 	if err != nil {
+		log.Printf("[WHATSAPP-INIT] ❌ Failed to encode QR code to PNG: %v", err)
 		return
 	}
 	qrMutex.Lock()
 	currentQR = png
 	qrMutex.Unlock()
+	log.Printf("[WHATSAPP-INIT] ✓ QR code PNG stored successfully (%d bytes)", len(png))
 }
 
 // renderQRCodeTerminal renders a QR code as ASCII/ANSI in the terminal
