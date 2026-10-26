@@ -99,9 +99,26 @@ func Connect(databaseURL string) error {
 		log.Printf("[WHATSAPP-INIT] ✓ Device JID: %s", deviceStore.ID.String())
 	}
 
+	// SAFETY CHECK: Ensure deviceStore is not nil
+	if deviceStore == nil {
+		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: deviceStore is nil after retrieval!")
+		return fmt.Errorf("deviceStore is nil")
+	}
+	log.Printf("[WHATSAPP-DEBUG] deviceStore validated, JID: %s", deviceStore.ID.String())
+
 	// INSTANTIATE CLIENT IMMEDIATELY - always available globally
 	clientLog := waLog.Stdout("Client", "INFO", true)
+	if clientLog == nil {
+		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: clientLog is nil!")
+		return fmt.Errorf("clientLog is nil")
+	}
+	log.Printf("[WHATSAPP-DEBUG] clientLog created successfully")
+
 	Client = whatsmeow.NewClient(deviceStore, clientLog)
+	if Client == nil {
+		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: whatsmeow.NewClient returned nil!")
+		return fmt.Errorf("whatsmeow.NewClient returned nil")
+	}
 	log.Printf("[WHATSAPP-INIT] ✓ WhatsMeow client created and stored in global variable")
 
 	// CRITICAL: Register event handlers BEFORE connecting
