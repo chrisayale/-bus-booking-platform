@@ -18,6 +18,7 @@ import (
 var Client *whatsmeow.Client
 var currentQR []byte
 var qrMutex sync.RWMutex
+var InitError error
 
 func GetCurrentQR() []byte {
 	qrMutex.RLock()
@@ -86,7 +87,8 @@ func Connect(databaseURL string) error {
 	container, err := sqlstore.New(context.Background(), "postgres", dbURL, dbLog)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to create SQL store: %v", err)
-		return fmt.Errorf("sqlstore.New failed: %w", err)
+		InitError = fmt.Errorf("sqlstore.New failed: %w", err)
+		return InitError
 	}
 	log.Println("[WHATSAPP-DEBUG] SQL store créé, instanciation du client NewClient...")
 
@@ -97,11 +99,13 @@ func Connect(databaseURL string) error {
 		log.Printf("[WHATSAPP-INIT] ⚠️ Aucun device valide trouvé (ou erreur: %v), création d'un nouveau store...", err)
 		deviceStore = container.NewDevice()
 		if deviceStore == nil {
-			return fmt.Errorf("failed to create new device store")
+			InitError = fmt.Errorf("failed to create new device store")
+			return InitError
 		}
 		if err := container.PutDevice(context.Background(), deviceStore); err != nil {
 			log.Printf("[WHATSAPP-INIT] ❌ Failed to create new device store: %v", err)
-			return fmt.Errorf("PutDevice failed: %w", err)
+			InitError = fmt.Errorf("PutDevice failed: %w", err)
+			return InitError
 		}
 		log.Println("[WHATSAPP-INIT] ✓ New device store created and saved")
 		log.Printf("[WHATSAPP-INIT] ✓ New device JID: %s", deviceStore.ID.String())
@@ -113,7 +117,8 @@ func Connect(databaseURL string) error {
 	// SAFETY CHECK: Ensure deviceStore is not nil
 	if deviceStore == nil {
 		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: deviceStore is nil after retrieval!")
-		return fmt.Errorf("deviceStore is nil")
+		InitError = fmt.Errorf("deviceStore is nil")
+		return InitError
 	}
 	log.Printf("[WHATSAPP-DEBUG] deviceStore validated, JID: %s", deviceStore.ID.String())
 
@@ -122,7 +127,8 @@ func Connect(databaseURL string) error {
 	clientLog := waLog.Stdout("Client", "INFO", true)
 	if clientLog == nil {
 		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: clientLog is nil!")
-		return fmt.Errorf("clientLog is nil")
+		InitError = fmt.Errorf("clientLog is nil")
+		return InitError
 	}
 	log.Printf("[WHATSAPP-DEBUG] clientLog created successfully")
 
@@ -130,7 +136,8 @@ func Connect(databaseURL string) error {
 	Client = whatsmeow.NewClient(deviceStore, clientLog)
 	if Client == nil {
 		log.Printf("[WHATSAPP-INIT] ❌ CRITICAL: whatsmeow.NewClient returned nil!")
-		return fmt.Errorf("whatsmeow.NewClient returned nil")
+		InitError = fmt.Errorf("whatsmeow.NewClient returned nil")
+		return InitError
 	}
 	log.Printf("[WHATSAPP-INIT] ✓ WhatsMeow client created and stored in global variable")
 
@@ -175,6 +182,7 @@ func startNewPairing() {
 	log.Printf("[WHATSAPP-DEBUG] Client.Connect() terminé, err = %v", err)
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to connect: %v", err)
+		InitError = fmt.Errorf("Client.Connect() failed: %w", err)
 		return
 	}
 
@@ -183,6 +191,7 @@ func startNewPairing() {
 	qrChan, err := Client.GetQRChannel(context.Background())
 	if err != nil {
 		log.Printf("[WHATSAPP-INIT] ❌ Failed to get QR channel: %v", err)
+		InitError = fmt.Errorf("GetQRChannel failed: %w", err)
 		return
 	}
 
@@ -190,6 +199,12 @@ func startNewPairing() {
 
 	// 3. Process QR events in background goroutine
 	go func() {
+		defer func() {
+			if r := recover(); r != nil {
+				log.Printf("[WHATSAPP-INIT] ❌ PANIC in QR event handler: %v", r)
+				InitError = fmt.Errorf("panic in QR event handler: %v", r)
+			}
+		}()
 		for evt := range qrChan {
 			log.Printf("[WHATSAPP-DEBUG] Événement QR reçu: type=%s, code=%s", evt.Event, evt.Code)
 			if evt.Event == "code" {

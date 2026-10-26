@@ -156,11 +156,15 @@ func main() {
 		qr := whatsapp.GetCurrentQR()
 		client := whatsapp.Client
 		if qr == nil {
+			initErrMsg := "Initialization in progress or exited silently"
+			if whatsapp.InitError != nil {
+				initErrMsg = whatsapp.InitError.Error()
+			}
 			c.JSON(http.StatusInternalServerError, gin.H{
-				"error":           "QR code not available",
+				"error":           "WhatsApp client not initialized",
 				"client_nil":      client == nil,
 				"qr_nil":          true,
-				"status":          "QR code not yet generated - check WhatsApp initialization logs",
+				"init_error":      initErrMsg,
 			})
 			return
 		}
@@ -171,11 +175,16 @@ func main() {
 	// WhatsApp status endpoint for diagnostics
 	r.GET("/api/whatsapp/status", func(c *gin.Context) {
 		if whatsapp.Client == nil {
+			initErrMsg := ""
+			if whatsapp.InitError != nil {
+				initErrMsg = whatsapp.InitError.Error()
+			}
 			c.JSON(http.StatusOK, gin.H{
-				"connected":  false,
-				"logged_in":  false,
-				"jid":        "",
-				"error":      "WhatsApp client not initialized",
+				"connected":   false,
+				"logged_in":   false,
+				"jid":         "",
+				"error":       "WhatsApp client not initialized",
+				"init_error":  initErrMsg,
 			})
 			return
 		}
