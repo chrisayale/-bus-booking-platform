@@ -260,8 +260,10 @@ func clearDeviceStore(container *sqlstore.Container) error {
 
 // addPgBouncerParams adds PgBouncer/Neon-compatible parameters to the PostgreSQL connection string
 // to prevent "unnamed prepared statement does not exist" errors with lib/pq driver
-// Both prefer_simple_protocol=true and statement_cache_mode=describe are required for Neon/PgBouncer
-// to prevent prepared statement creation during sqlstore.New internal migrations
+// All three parameters are required for Neon/PgBouncer compatibility:
+// - prefer_simple_protocol=true: forces simple protocol (no prepared statements)
+// - statement_cache_mode=describe: prevents statement caching issues
+// - binary_parameters=no: disables binary parameter encoding that causes parameter count mismatches
 func addPgBouncerParams(dbURL string) string {
 	// Only add for pooled connections
 	isPooled := strings.Contains(dbURL, "neon.tech") ||
@@ -275,13 +277,14 @@ func addPgBouncerParams(dbURL string) string {
 	// Check if already has query parameters
 	hasQuery := strings.Contains(dbURL, "?")
 
-	// Add both prefer_simple_protocol=true and statement_cache_mode=describe
-	// These are BOTH required for Neon/PgBouncer compatibility
-	params := "prefer_simple_protocol=true&statement_cache_mode=describe"
+	// Add all three required parameters for Neon/PgBouncer compatibility
+	params := "prefer_simple_protocol=true&statement_cache_mode=describe&binary_parameters=no"
 
 	if hasQuery {
 		// Check if parameters already exist
-		if strings.Contains(dbURL, "prefer_simple_protocol=") && strings.Contains(dbURL, "statement_cache_mode=") {
+		if strings.Contains(dbURL, "prefer_simple_protocol=") &&
+			strings.Contains(dbURL, "statement_cache_mode=") &&
+			strings.Contains(dbURL, "binary_parameters=") {
 			return dbURL
 		}
 		return dbURL + "&" + params
