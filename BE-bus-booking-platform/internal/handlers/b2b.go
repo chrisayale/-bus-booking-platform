@@ -18,6 +18,7 @@ import (
 	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
+	"github.com/lib/pq"
 	waTypes "go.mau.fi/whatsmeow/types"
 )
 
@@ -600,27 +601,49 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		return
 	}
 
-	// Generate a unique 6-digit reference code for the agency
-	referenceCode, err := generateUniqueReferenceCode(tx)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate reference code"})
+	// Create organization record with reference code (with retry loop for unique constraint)
+	var organization models.Organization
+	var referenceCode string
+	const maxRefCodeAttempts = 5
+	for i := 0; i < maxRefCodeAttempts; i++ {
+		// Generate a random 6-digit reference code
+		n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+		if err != nil {
+			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate reference code"})
+			return
+		}
+		referenceCode = fmt.Sprintf("%06d", n.Int64())
+
+		// Attempt to insert organization with the generated reference code
+		err = tx.QueryRowx(`
+			INSERT INTO organizations (name, email, phone, is_active, reference_code)
+			VALUES ($1, $2, $3, $4, $5)
+			RETURNING id, name, email, phone, logo_url, is_active, reference_code, created_at, updated_at`,
+			pendingAgency.AgencyName,
+			pendingAgency.Email,
+			pendingAgency.ContactPhone,
+			true, // Set as active upon approval
+			referenceCode,
+		).StructScan(&organization)
+
+		if err == nil {
+			// Success - reference code was unique
+			break
+		}
+
+		// Check if it's a unique constraint violation (SQL state 23505)
+		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
+			// Duplicate reference_code, retry with a new code
+			continue
+		}
+
+		// Some other error
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
 		return
 	}
 
-	// Create organization record with reference code
-	var organization models.Organization
-	err = tx.QueryRowx(`
-		INSERT INTO organizations (name, email, phone, is_active, reference_code)
-		VALUES ($1, $2, $3, $4, $5)
-		RETURNING id, name, email, phone, logo_url, is_active, reference_code, created_at, updated_at`,
-		pendingAgency.AgencyName,
-		pendingAgency.Email,
-		pendingAgency.ContactPhone,
-		true, // Set as active upon approval
-		referenceCode,
-	).StructScan(&organization)
-	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+	if referenceCode == "" {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate unique reference code after retries"})
 		return
 	}
 
@@ -675,27 +698,6 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		"organization": organization,
 		"user":         user,
 	})
-}
-
-// generateUniqueReferenceCode generates a unique 6-digit reference code
-func generateUniqueReferenceCode(tx *sqlx.Tx) (string, error) {
-	const maxAttempts = 10
-	for i := 0; i < maxAttempts; i++ {
-		n, err := rand.Int(rand.Reader, big.NewInt(1000000))
-		if err != nil {
-			return "", err
-		}
-		code := fmt.Sprintf("%06d", n.Int64())
-		var exists bool
-		err = tx.Get(&exists, `SELECT EXISTS(SELECT 1 FROM organizations WHERE reference_code = $1)`, code)
-		if err != nil {
-			return "", err
-		}
-		if !exists {
-			return code, nil
-		}
-	}
-	return "", fmt.Errorf("failed to generate unique reference code after %d attempts", maxAttempts)
 }
 
 // RejectAgency rejects a pending agency request
