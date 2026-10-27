@@ -2512,6 +2512,72 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 			// Handle unified action choice for both single ticket and pay all
 			return processControllerActionChoice(s, text)
 
+		// Agency creation flow
+		case StepAgencyName:
+			// Save agency name and ask for manager name
+			s.AgencyName = strings.TrimSpace(text)
+			if s.AgencyName == "" {
+				return "Veuillez entrer un nom d'agence valide."
+			}
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyManagerName
+			return getPromptForStep(s)
+
+		case StepAgencyManagerName:
+			// Save manager name and ask for address
+			s.ManagerName = strings.TrimSpace(text)
+			if s.ManagerName == "" {
+				return "Veuillez entrer un nom de responsable valide."
+			}
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyAddress
+			return getPromptForStep(s)
+
+		case StepAgencyAddress:
+			// Save address and ask for contact phone
+			s.Address = strings.TrimSpace(text)
+			if s.Address == "" {
+				return "Veuillez entrer une ville/adresse valide."
+			}
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyContactPhone
+			return getPromptForStep(s)
+
+		case StepAgencyContactPhone:
+			// Save contact phone and show confirmation
+			contactPhone := strings.TrimSpace(text)
+			// Validate phone format: should start with 243 and be 12 digits total
+			if !strings.HasPrefix(contactPhone, "243") || len(contactPhone) != 12 {
+				return "Numéro de téléphone invalide. Format attendu : 243XXXXXXXXX (12 chiffres commençant par 243)"
+			}
+			if _, err := strconv.Atoi(contactPhone); err != nil {
+				return "Numéro de téléphone invalide. Veuillez entrer uniquement des chiffres."
+			}
+			s.ContactPhone = contactPhone
+			s.PreviousStep = s.Step
+			s.Step = StepAgencyConfirm
+			return getPromptForStep(s)
+
+		case StepAgencyConfirm:
+			// Confirm agency creation
+			lower := strings.ToLower(strings.TrimSpace(text))
+			if lower != "oui" {
+				resetSession(phone)
+				return "Création d'agence annulée. Tapez *menu* pour revenir au menu principal."
+			}
+
+			// Create the agency (organization) in the database
+			orgID, err := createAgency(s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
+			if err != nil {
+				return fmt.Sprintf("❌ Erreur lors de la création de l'agence : %v\n\nTapez *menu* pour réessayer.", err)
+			}
+
+			// Success message
+			successMsg := fmt.Sprintf("✅ *Agence créée avec succès !*\n\n🏢 *Nom* : %s\n👔 *Responsable* : %s\n📍 *Adresse* : %s\n📞 *Téléphone* : %s\n🆔 *ID* : %s\n\nL'agence est maintenant disponible pour la gestion des voyages.\n\nTapez *menu* pour revenir au menu principal.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone, orgID)
+
+			resetSession(phone)
+			return successMsg
+
 		default:
 			return "Étape inconnue. Tapez *menu* pour revenir au menu principal."
 		}
@@ -4326,4 +4392,31 @@ func sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passe
 
 	SendText(jid, message)
 	log.Printf("[CASH VALIDATION] Notification sent to passenger %s for booking %s", cleanedPhone, bookingRef)
+}
+
+// createAgency creates a new organization (agency) in the database
+// Returns the organization ID on success
+func createAgency(name, managerName, address, contactPhone string) (string, error) {
+	var orgID string
+
+	// Generate a slug from the name for uniqueness
+	slug := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
+	// Add a random suffix to ensure uniqueness
+	slug = fmt.Sprintf("%s-%d", slug, time.Now().UnixNano()%10000)
+
+	err := DB.QueryRow(`
+		INSERT INTO organizations (id, name, slug, is_active, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, true, NOW(), NOW())
+		RETURNING id
+	`, name, slug).Scan(&orgID)
+
+	if err != nil {
+		return "", fmt.Errorf("échec de la création de l'organisation : %w", err)
+	}
+
+	// Note: In a full implementation, you might also want to create a user account
+	// for the agency manager with role 'owner' or 'agent' linked to this organization.
+	// This would require additional fields like email and password.
+
+	return orgID, nil
 }
