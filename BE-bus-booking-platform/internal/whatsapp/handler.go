@@ -2567,14 +2567,14 @@ func process(phone string, s *Session, text string, sender types.JID) string {
 				return "Création d'agence annulée. Tapez *menu* pour revenir au menu principal."
 			}
 
-			// Create the agency (organization) in the database with owner user
-			orgID, _, _, err := createAgency(s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
+			// Create the pending agency request in the database
+			pendingAgencyID, _, _, err := createAgency(s.AgencyName, s.ManagerName, s.Address, s.ContactPhone)
 			if err != nil {
-				return fmt.Sprintf("❌ Erreur lors de la création de l'agence : %v\n\nTapez *menu* pour réessayer.", err)
+				return fmt.Sprintf("❌ Erreur lors de la création de la demande d'agence : %v\n\nTapez *menu* pour réessayer.", err)
 			}
 
 			// Success message - agency is pending admin approval
-			successMsg := fmt.Sprintf("✅ *Agence enregistrée avec succès !*\n\n🏢 *Nom* : %s\n👔 *Responsable* : %s\n📍 *Adresse* : %s\n📞 *Téléphone* : %s\n🆔 *ID* : %s\n\n⏳ Votre agence est actuellement **en attente de validation** par l'administrateur.\nUne fois validée, vous recevrez un message contenant votre adresse email de connexion et votre mot de passe par défaut.\n\nTapez *menu* pour revenir au menu principal.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone, orgID)
+			successMsg := fmt.Sprintf("✅ *Demande d'agence enregistrée avec succès !*\n\n🏢 *Nom* : %s\n👔 *Responsable* : %s\n📍 *Adresse* : %s\n📞 *Téléphone* : %s\n🆔 *ID de demande* : %s\n\n⏳ Votre demande est actuellement **en attente de validation** par l'administrateur.\nUne fois validée, vous recevrez un message contenant votre adresse email de connexion et votre mot de passe par défaut.\n\nTapez *menu* pour revenir au menu principal.", s.AgencyName, s.ManagerName, s.Address, s.ContactPhone, pendingAgencyID)
 
 			resetSession(phone)
 			return successMsg
@@ -4395,10 +4395,10 @@ func sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passe
 	log.Printf("[CASH VALIDATION] Notification sent to passenger %s for booking %s", cleanedPhone, bookingRef)
 }
 
-// createAgency creates a new organization (agency) in the database
-// Returns the organization ID, manager email, and default password on success
+// createAgency creates a pending agency request in the database
+// Returns the pending agency ID, manager email, and default password on success
 func createAgency(name, managerName, address, contactPhone string) (string, string, string, error) {
-	var orgID string
+	var pendingAgencyID string
 
 	// Generate email from agency name: lowercase, remove spaces/special chars, add domain
 	// Example: "KANZANZA SAFARI" -> "kanzanzasafari@ayaletrans.com"
@@ -4420,39 +4420,22 @@ func createAgency(name, managerName, address, contactPhone string) (string, stri
 	// Generate a default password (8 chars alphanumeric)
 	defaultPassword := generateDefaultPassword(8)
 
-	// Hash the password
-	passwordHash, err := utils.HashPassword(defaultPassword)
-	if err != nil {
-		return "", "", "", fmt.Errorf("échec du hachage du mot de passe : %w", err)
-	}
-
-	// Use a transaction to create organization and owner user atomically
+	// Use a transaction to create pending agency atomically
 	tx, err := DB.Beginx()
 	if err != nil {
 		return "", "", "", fmt.Errorf("échec du début de transaction : %w", err)
 	}
 	defer tx.Rollback()
 
-	// Create organization
+	// Create pending agency request
 	err = tx.QueryRow(`
-		INSERT INTO organizations (id, name, email, phone, is_active, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, true, NOW(), NOW())
+		INSERT INTO pending_agencies (id, agency_name, manager_name, address, contact_phone, email, default_password, status, created_at, updated_at)
+		VALUES (uuid_generate_v4(), $1, $2, $3, $4, $5, $6, 'pending', NOW(), NOW())
 		RETURNING id
-	`, name, email, contactPhone).Scan(&orgID)
+	`, name, managerName, address, contactPhone, email, defaultPassword).Scan(&pendingAgencyID)
 
 	if err != nil {
-		return "", "", "", fmt.Errorf("échec de la création de l'organisation : %w", err)
-	}
-
-	// Create owner user linked to the organization
-	// Use the agency email as the user email for login
-	_, err = tx.Exec(`
-		INSERT INTO users (id, email, password_hash, full_name, phone, role, organization_id, is_verified, is_active, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, $3, $4, 'owner', $5, true, true, NOW(), NOW())
-	`, email, passwordHash, managerName, contactPhone, orgID)
-
-	if err != nil {
-		return "", "", "", fmt.Errorf("échec de la création de l'utilisateur propriétaire : %w", err)
+		return "", "", "", fmt.Errorf("échec de la création de la demande d'agence : %w", err)
 	}
 
 	// Commit transaction
@@ -4460,7 +4443,7 @@ func createAgency(name, managerName, address, contactPhone string) (string, stri
 		return "", "", "", fmt.Errorf("échec de la validation de la transaction : %w", err)
 	}
 
-	return orgID, email, defaultPassword, nil
+	return pendingAgencyID, email, defaultPassword, nil
 }
 
 // generateDefaultPassword generates a random alphanumeric password of given length

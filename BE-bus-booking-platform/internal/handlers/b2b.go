@@ -2,11 +2,12 @@ package handlers
 
 import (
 	"bytes"
-	"context"
+	"crypto/rand"
 	"database/sql"
 	"encoding/json"
 	"fmt"
 	"io"
+	"math/big"
 	"net/http"
 	"path/filepath"
 	"time"
@@ -17,9 +18,7 @@ import (
 	"github.com/bus-booking/BE-bus-booking-platform/internal/whatsapp"
 	"github.com/gin-gonic/gin"
 	"github.com/jmoiron/sqlx"
-	waProto "go.mau.fi/whatsmeow/proto/waE2E"
 	waTypes "go.mau.fi/whatsmeow/types"
-	"google.golang.org/protobuf/proto"
 )
 
 type B2BHandler struct {
@@ -601,16 +600,24 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		return
 	}
 
-	// Create organization record
+	// Generate a unique 6-digit reference code for the agency
+	referenceCode, err := generateUniqueReferenceCode(tx)
+	if err != nil {
+		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate reference code"})
+		return
+	}
+
+	// Create organization record with reference code
 	var organization models.Organization
 	err = tx.QueryRowx(`
-		INSERT INTO organizations (name, email, phone, is_active)
-		VALUES ($1, $2, $3, $4)
-		RETURNING id, name, email, phone, logo_url, is_active, created_at, updated_at`,
+		INSERT INTO organizations (name, email, phone, is_active, reference_code)
+		VALUES ($1, $2, $3, $4, $5)
+		RETURNING id, name, email, phone, logo_url, is_active, reference_code, created_at, updated_at`,
 		pendingAgency.AgencyName,
 		pendingAgency.Email,
 		pendingAgency.ContactPhone,
 		true, // Set as active upon approval
+		referenceCode,
 	).StructScan(&organization)
 	if err != nil {
 		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
@@ -650,20 +657,14 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		return
 	}
 
-	// Send WhatsApp notification about successful approval
+	// Send WhatsApp notification about successful approval with reference code and credentials
 	go func() {
-		// Format the WhatsApp message
-		message := fmt.Sprintf("Votre compte a été activé avec succès !\n\n📧 Email : %s\n🔑 Mot de passe par défaut : at1234\n\nVeuillez choisir une option :\n1. Changer le mot de passe\n2. Pas maintenant\n\nRépondez avec le numéro de votre choix.", pendingAgency.Email)
+		// Format the WhatsApp message with reference code, email and password
+		message := fmt.Sprintf("Votre compte a été activé avec succès !\n\n🏢 Code agence : %s\n📧 Email : %s\n🔑 Mot de passe : %s\n\nVeuillez choisir une option :\n1. Changer le mot de passe\n2. Pas maintenant\n\nRépondez avec le numéro de votre choix.", referenceCode, pendingAgency.Email, pendingAgency.DefaultPassword)
 
-		// Send the WhatsApp message using the client directly
+		// Send the WhatsApp message using the helper function
 		jid := waTypes.NewJID(pendingAgency.ContactPhone, waTypes.DefaultUserServer)
-		msg := &waProto.Message{
-			Conversation: proto.String(message),
-		}
-		if _, err := whatsapp.Client.SendMessage(context.Background(), jid, msg); err != nil {
-			// Log error but don't fail the approval process
-			fmt.Printf("[ERROR] Failed to send WhatsApp message to %s: %v\n", pendingAgency.ContactPhone, err)
-		}
+		whatsapp.SendText(jid, message)
 
 		// Set up the FSM state for handling the response
 		whatsapp.SetSessionStep(pendingAgency.ContactPhone, whatsapp.StepPasswordChangeMenu)
@@ -674,6 +675,27 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		"organization": organization,
 		"user":         user,
 	})
+}
+
+// generateUniqueReferenceCode generates a unique 6-digit reference code
+func generateUniqueReferenceCode(tx *sqlx.Tx) (string, error) {
+	const maxAttempts = 10
+	for i := 0; i < maxAttempts; i++ {
+		n, err := rand.Int(rand.Reader, big.NewInt(1000000))
+		if err != nil {
+			return "", err
+		}
+		code := fmt.Sprintf("%06d", n.Int64())
+		var exists bool
+		err = tx.Get(&exists, `SELECT EXISTS(SELECT 1 FROM organizations WHERE reference_code = $1)`, code)
+		if err != nil {
+			return "", err
+		}
+		if !exists {
+			return code, nil
+		}
+	}
+	return "", fmt.Errorf("failed to generate unique reference code after %d attempts", maxAttempts)
 }
 
 // RejectAgency rejects a pending agency request

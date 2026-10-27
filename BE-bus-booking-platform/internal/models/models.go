@@ -8,14 +8,15 @@ import (
 
 // Organization represents the bus company
 type Organization struct {
-	ID        string    `db:"id" json:"id"`
-	Name      string    `db:"name" json:"name"`
-	Email     string    `db:"email" json:"email"`
-	Phone     *string   `db:"phone" json:"phone,omitempty"`
-	LogoURL   *string   `db:"logo_url" json:"logo_url,omitempty"`
-	IsActive  bool      `db:"is_active" json:"is_active"`
-	CreatedAt time.Time `db:"created_at" json:"created_at"`
-	UpdatedAt time.Time `db:"updated_at" json:"updated_at"`
+	ID            string    `db:"id" json:"id"`
+	Name          string    `db:"name" json:"name"`
+	Email         string    `db:"email" json:"email"`
+	Phone         *string   `db:"phone" json:"phone,omitempty"`
+	LogoURL       *string   `db:"logo_url" json:"logo_url,omitempty"`
+	IsActive      bool      `db:"is_active" json:"is_active"`
+	ReferenceCode *string   `db:"reference_code" json:"reference_code,omitempty"`
+	CreatedAt     time.Time `db:"created_at" json:"created_at"`
+	UpdatedAt     time.Time `db:"updated_at" json:"updated_at"`
 }
 
 // User represents both owner and passenger accounts
