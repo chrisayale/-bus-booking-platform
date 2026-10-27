@@ -597,7 +597,7 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 	// Hash the default password
 	passwordHash, err := utils.HashPassword(pendingAgency.DefaultPassword)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to hash password"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to hash password: %v", err)})
 		return
 	}
 
@@ -609,7 +609,7 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		// Generate a random 6-digit reference code
 		n, err := rand.Int(rand.Reader, big.NewInt(1000000))
 		if err != nil {
-			c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to generate reference code"})
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to generate reference code: %v", err)})
 			return
 		}
 		referenceCode = fmt.Sprintf("%06d", n.Int64())
@@ -633,12 +633,23 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 
 		// Check if it's a unique constraint violation (SQL state 23505)
 		if pqErr, ok := err.(*pq.Error); ok && pqErr.Code == "23505" {
-			// Duplicate reference_code, retry with a new code
-			continue
+			// Check which constraint was violated
+			constraint := pqErr.Constraint
+			if constraint == "organizations_email_key" {
+				c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("organization email already exists: %s", pendingAgency.Email)})
+				return
+			}
+			if constraint == "organizations_reference_code_key" {
+				// Duplicate reference_code, retry with a new code
+				continue
+			}
+			// Other unique constraint violation
+			c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("unique constraint violation on organizations: %s (constraint: %s)", pqErr.Message, constraint)})
+			return
 		}
 
-		// Some other error
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create organization"})
+		// Some other error - return the actual SQL error
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to create organization: %v", err)})
 		return
 	}
 
@@ -663,20 +674,36 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 		"approved", // approval_status
 	).StructScan(&user)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to create owner user"})
+		// Check for specific SQL errors
+		if pqErr, ok := err.(*pq.Error); ok {
+			if pqErr.Code == "23505" {
+				constraint := pqErr.Constraint
+				if constraint == "users_email_key" {
+					c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("owner user email already exists: %s", pendingAgency.Email)})
+					return
+				}
+				// Other unique constraint
+				c.JSON(http.StatusConflict, gin.H{"error": fmt.Sprintf("unique constraint violation on users: %s (constraint: %s)", pqErr.Message, constraint)})
+				return
+			}
+			// Other PostgreSQL error
+			c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("database error creating owner user: %s", pqErr.Message)})
+			return
+		}
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to create owner user: %v", err)})
 		return
 	}
 
 	// Update pending agency status to approved
 	_, err = tx.Exec(`UPDATE pending_agencies SET status = 'approved', updated_at = NOW() WHERE id = $1`, id)
 	if err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to update pending agency status"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to update pending agency status: %v", err)})
 		return
 	}
 
 	// Commit transaction
 	if err = tx.Commit(); err != nil {
-		c.JSON(http.StatusInternalServerError, gin.H{"error": "failed to commit transaction"})
+		c.JSON(http.StatusInternalServerError, gin.H{"error": fmt.Sprintf("failed to commit transaction: %v", err)})
 		return
 	}
 
