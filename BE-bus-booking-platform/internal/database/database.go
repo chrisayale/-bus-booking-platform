@@ -13,6 +13,9 @@ import (
 
 // EnsurePgBouncerParams adds PgBouncer/Neon compatible parameters to the database URL
 // These parameters are required to avoid "prepared statement" errors (08P01) with connection poolers
+// - prefer_simple_protocol=true: forces simple protocol (no prepared statements)
+// - statement_cache_mode=disable: disables statement caching to prevent 08P01 errors
+// - binary_parameters=yes: uses binary parameter encoding to prevent parameter count mismatches
 func EnsurePgBouncerParams(dbURL string) string {
 	if dbURL == "" {
 		return dbURL
@@ -25,10 +28,10 @@ func EnsurePgBouncerParams(dbURL string) string {
 		}
 	}
 	if !strings.Contains(dbURL, "statement_cache_mode=") {
-		dbURL += "&statement_cache_mode=describe"
+		dbURL += "&statement_cache_mode=disable"
 	}
 	if !strings.Contains(dbURL, "binary_parameters=") {
-		dbURL += "&binary_parameters=no"
+		dbURL += "&binary_parameters=yes"
 	}
 	return dbURL
 }
