@@ -7,6 +7,7 @@ import (
 	"encoding/json"
 	"fmt"
 	"io"
+	"log"
 	"math/big"
 	"net/http"
 	"path/filepath"
@@ -592,6 +593,13 @@ func (h *B2BHandler) ApproveAgency(c *gin.Context) {
 	if pendingAgency.Status != "pending" {
 		c.JSON(http.StatusBadRequest, gin.H{"error": "agency request has already been processed"})
 		return
+	}
+
+	// Safety check: ensure reference_code column exists (fallback for environments where migrations may not have run)
+	_, err = tx.Exec(`ALTER TABLE organizations ADD COLUMN IF NOT EXISTS reference_code VARCHAR(6) UNIQUE;`)
+	if err != nil {
+		// Log warning but continue - column might already exist or migration will handle it
+		log.Printf("Warning: could not ensure reference_code column exists: %v", err)
 	}
 
 	// Hash the default password
