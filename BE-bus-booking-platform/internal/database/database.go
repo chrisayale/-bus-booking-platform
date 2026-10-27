@@ -11,6 +11,28 @@ import (
 	"github.com/lib/pq"
 )
 
+// EnsurePgBouncerParams adds PgBouncer/Neon compatible parameters to the database URL
+// These parameters are required to avoid "prepared statement" errors (08P01) with connection poolers
+func EnsurePgBouncerParams(dbURL string) string {
+	if dbURL == "" {
+		return dbURL
+	}
+	if !strings.Contains(dbURL, "prefer_simple_protocol=") {
+		if strings.Contains(dbURL, "?") {
+			dbURL += "&prefer_simple_protocol=true"
+		} else {
+			dbURL += "?prefer_simple_protocol=true"
+		}
+	}
+	if !strings.Contains(dbURL, "statement_cache_mode=") {
+		dbURL += "&statement_cache_mode=describe"
+	}
+	if !strings.Contains(dbURL, "binary_parameters=") {
+		dbURL += "&binary_parameters=no"
+	}
+	return dbURL
+}
+
 //go:embed migrations/*.sql
 var migrationsFS embed.FS
 
@@ -18,6 +40,8 @@ var migrationsFS embed.FS
 var seedSQL string
 
 func Connect(databaseURL string) (*sqlx.DB, error) {
+	// Ensure PgBouncer/Neon compatible parameters are added
+	databaseURL = EnsurePgBouncerParams(databaseURL)
 	db, err := sqlx.Connect("postgres", databaseURL)
 	if err != nil {
 		return nil, fmt.Errorf("failed to connect to database: %w", err)

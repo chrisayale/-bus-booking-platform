@@ -61,18 +61,8 @@ func main() {
 			log.Println("[WHATSAPP-INIT] ❌ DATABASE_URL is empty!")
 			return
 		}
-		// Fix for PgBouncer/Neon pooler: add statement_cache_mode=describe
-		// Only add this parameter for pooled connections (e.g., Neon, PgBouncer)
-		// Local PostgreSQL doesn't support this parameter
-		if strings.Contains(dbURL, "neon.tech") || strings.Contains(dbURL, "pgbouncer") || strings.Contains(dbURL, "pooler") {
-			if !strings.Contains(dbURL, "statement_cache_mode=") {
-				if strings.Contains(dbURL, "?") {
-					dbURL += "&statement_cache_mode=describe"
-				} else {
-					dbURL += "?statement_cache_mode=describe"
-				}
-			}
-		}
+		// Use centralized PgBouncer/Neon parameter handling for consistency
+		dbURL = database.EnsurePgBouncerParams(dbURL)
 		log.Println("[WHATSAPP-INIT] Starting WhatsApp connection in background...")
 		if err := whatsapp.Connect(dbURL); err != nil {
 			log.Printf("[WHATSAPP-INIT] ❌ Erreur d'initialisation : %v", err)

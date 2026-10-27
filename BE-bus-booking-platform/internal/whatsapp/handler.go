@@ -4399,16 +4399,28 @@ func sendCashValidationNotificationToPassenger(passengerPhone, bookingRef, passe
 func createAgency(name, managerName, address, contactPhone string) (string, error) {
 	var orgID string
 
-	// Generate a slug from the name for uniqueness
-	slug := strings.ToLower(strings.ReplaceAll(name, " ", "-"))
-	// Add a random suffix to ensure uniqueness
-	slug = fmt.Sprintf("%s-%d", slug, time.Now().UnixNano()%10000)
+	// Generate email from agency name: lowercase, remove spaces/special chars, add domain
+	// Example: "KANZANZA SAFARI" -> "kanzanzasafari@ayaletrans.com"
+	cleanName := strings.ToLower(name)
+	cleanName = strings.ReplaceAll(cleanName, " ", "")
+	// Remove any non-alphanumeric characters (keep only a-z, 0-9)
+	var emailName strings.Builder
+	for _, r := range cleanName {
+		if (r >= 'a' && r <= 'z') || (r >= '0' && r <= '9') {
+			emailName.WriteRune(r)
+		}
+	}
+	email := fmt.Sprintf("%s@ayaletrans.com", emailName.String())
+
+	// Add timestamp suffix to ensure uniqueness if needed
+	// This handles the case where two agencies might have similar names
+	email = fmt.Sprintf("%s%d", strings.TrimSuffix(email, "@ayaletrans.com"), time.Now().UnixNano()%10000) + "@ayaletrans.com"
 
 	err := DB.QueryRow(`
-		INSERT INTO organizations (id, name, slug, is_active, created_at, updated_at)
-		VALUES (gen_random_uuid(), $1, $2, true, NOW(), NOW())
+		INSERT INTO organizations (id, name, email, phone, is_active, created_at, updated_at)
+		VALUES (gen_random_uuid(), $1, $2, $3, true, NOW(), NOW())
 		RETURNING id
-	`, name, slug).Scan(&orgID)
+	`, name, email, contactPhone).Scan(&orgID)
 
 	if err != nil {
 		return "", fmt.Errorf("échec de la création de l'organisation : %w", err)
