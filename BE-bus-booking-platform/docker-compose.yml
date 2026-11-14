@@ -29,6 +29,7 @@ services:
       JWT_SECRET: "change-me-in-production"
       SMTP_HOST: ""
       SMTP_PORT: "587"
+      ENVIRONMENT: "production"
     depends_on:
       db:
         condition: service_healthy
