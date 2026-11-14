@@ -418,14 +418,28 @@ func main() {
 		log.Printf("  Created %d routes with stops", len(routes))
 	}
 
-	// Create journeys for next 30 days
-	log.Println("Creating journeys for next 30 days...")
+	// Create journeys for extended range: 7 days ago to 30 days in future (includes today and tomorrow)
+	log.Println("Creating journeys for extended range (-7 days to +30 days)...")
 	journeyCount := 0
-	startDate := time.Now().AddDate(0, 0, 1) // Start from tomorrow
+	now := time.Now()
 
-	for day := 0; day < 30; day++ {
-		currentDate := startDate.AddDate(0, 0, day)
+	// Create a list of dates covering the extended range
+	// Day -7 to Day 30 (inclusive) = 38 days total
+	for dayOffset := -7; dayOffset <= 30; dayOffset++ {
+		currentDate := now.AddDate(0, 0, dayOffset)
 		dateStr := currentDate.Format("2006-01-02")
+
+		// Determine day label for logging
+		var dayLabel string
+		if dayOffset == 0 {
+			dayLabel = " (TODAY)"
+		} else if dayOffset == 1 {
+			dayLabel = " (TOMORROW)"
+		} else if dayOffset < 0 {
+			dayLabel = fmt.Sprintf(" (%d days ago)", -dayOffset)
+		}
+
+		log.Printf("  Creating journeys for %s%s", dateStr, dayLabel)
 
 		for i := range agencies {
 			routes := agencyRoutes[i]
@@ -434,7 +448,7 @@ func main() {
 
 			for k := range routes {
 				// Create 2-3 journeys per route per day
-				numJourneys := 2 + (day + k + i) % 2
+				numJourneys := 2 + (dayOffset + k + i + 100) % 2 // +100 to ensure positive modulo
 
 				for j := 0; j < numJourneys; j++ {
 					journeyID := generateUUID()
@@ -460,11 +474,24 @@ func main() {
 						arrDate = currentDate.AddDate(0, 0, 1).Format("2006-01-02")
 					}
 
+					// Set status based on date: past dates = completed, today/tomorrow = scheduled/boarding
+					status := "scheduled"
+					if dayOffset < 0 {
+						status = "completed"
+					} else if dayOffset == 0 {
+						// For today, some journeys could be boarding or departed
+						if baseHour < now.Hour() || (baseHour == now.Hour() && baseMinute < now.Minute()) {
+							status = "departed"
+						} else if baseHour == now.Hour() && baseMinute >= now.Minute() && baseMinute <= now.Minute()+30 {
+							status = "boarding"
+						}
+					}
+
 					_, err = tx.Exec(`
 						INSERT INTO journeys (id, organization_id, route_id, bus_id, departure_date, departure_time, arrival_date, arrival_time, status, created_at, updated_at)
-						VALUES ($1, $2, $3, $4, $5, $6, $7, $8, 'scheduled', NOW(), NOW())
+						VALUES ($1, $2, $3, $4, $5, $6, $7, $8, $9, NOW(), NOW())
 						ON CONFLICT DO NOTHING
-					`, journeyID, orgID, routeID, busID, dateStr, depTime, arrDate, arrTime)
+					`, journeyID, orgID, routeID, busID, dateStr, depTime, arrDate, arrTime, status)
 					if err != nil {
 						log.Fatalf("Failed to insert journey: %v", err)
 					}
